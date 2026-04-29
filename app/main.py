@@ -45,7 +45,7 @@ def set_patreon_session(payload: PatreonSessionPayload, x_api_key: Optional[str]
     }
     encoded = base64.b64encode(json.dumps(session_data).encode()).decode()
     settings.PATREON_SESSION = encoded
-    msg = "Cookies byly úspěšně nahrány, služba je připravena k přípravě příspěvků"
+    msg = "Cookies byly úspěšně nahrány ✅, služba je připravena k přípravě příspěvků 🚀"
     log.info(msg)
     notify_telegram(msg)
     return {

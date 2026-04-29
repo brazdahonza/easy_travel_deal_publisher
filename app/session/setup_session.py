@@ -13,7 +13,7 @@ import getpass
 from pathlib import Path
 
 
-def _print_result(encoded: str, email: str) -> None:
+def _print_result(encoded: str, email: str, cookies: list) -> None:
     print("\n" + "=" * 60)
     print("Session setup complete!")
     print("=" * 60)
@@ -21,6 +21,16 @@ def _print_result(encoded: str, email: str) -> None:
     print(f"\nPATREON_SESSION={encoded}\n")
     print("=" * 60)
     print(f"\nOr run:\necho 'PATREON_SESSION={encoded}' >> .env\n")
+    print("=" * 60)
+    print("\nAlternatively, you can send the following JSON payload via Postman to the API:")
+    print("POST /session/patreon")
+    print("Content-Type: application/json\n")
+    payload = {
+        "cookies": cookies,
+        "email": email or ""
+    }
+    print(json.dumps(payload, indent=2))
+    print("\n" + "=" * 60)
 
 
 async def setup_patreon_session_manual():
@@ -58,7 +68,7 @@ async def setup_patreon_session_manual():
                 "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
             }
             encoded = base64.b64encode(json.dumps(session_data).encode()).decode()
-            _print_result(encoded, email)
+            _print_result(encoded, email, cookies)
 
         except Exception as e:
             print(f"Error: {e}")
@@ -199,7 +209,7 @@ async def setup_patreon_session():
                 "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
             }
             encoded = base64.b64encode(json.dumps(session_data).encode()).decode()
-            _print_result(encoded, email)
+            _print_result(encoded, email, cookies)
 
         except Exception as e:
             print(f"Error: {e}")
