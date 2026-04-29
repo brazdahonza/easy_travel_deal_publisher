@@ -15,11 +15,17 @@ class AnthropicWrapper:
             self._client = None
 
     def select(self, deals: List[Dict]) -> Dict:
-        # Build prompt
+        deals_with_extra = []
+        for d in deals:
+            entry = {k: v for k, v in d.items() if not k.startswith("_")}
+            if d.get("extra"):
+                entry["extra_context"] = d["extra"]
+            deals_with_extra.append(entry)
         prompt = (
             "You are deal selector for flynow.cz. Receive JSON list of deals. "
+            "Each deal may contain 'extra_context' with additional information — use it when selecting. "
             "Return XML tags <selection><ids>id1,id2</ids><justification>... in Czech</justification>. "
-            f"DATA: {deals}"
+            f"DATA: {deals_with_extra}"
         )
         if not self._client:
             log.debug("Anthropic client unavailable")

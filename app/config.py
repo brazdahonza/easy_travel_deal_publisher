@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     TWITTER_ACCESS_TOKEN: Optional[str] = None
     TWITTER_ACCESS_SECRET: Optional[str] = None
     TELEGRAM_BOT_TOKEN: Optional[str] = None
+    TELEGRAM_CHAT_ID: Optional[str] = None
     NEARBY_COUNTRIES: Optional[str] = None
     CREATOR_EDITOR_URL: str = "https://www.patreon.com/creator/posts/new"
 

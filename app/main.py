@@ -45,6 +45,9 @@ def set_patreon_session(payload: PatreonSessionPayload, x_api_key: Optional[str]
     }
     encoded = base64.b64encode(json.dumps(session_data).encode()).decode()
     settings.PATREON_SESSION = encoded
+    msg = "Cookies byly úspěšně nahrány, služba je připravena k přípravě příspěvků"
+    log.info(msg)
+    notify_telegram(msg)
     return {
         "patreon_session": encoded,
         "note": "Session active. Persist by setting PATREON_SESSION in .env",
@@ -88,7 +91,6 @@ async def ingest(payload: IngestPayload, db: Any = Depends(get_db), x_api_key: O
                 continue
             # generate posts
             patreon_title, patreon_body = generate_patreon_post(deal)
-            text = generate_twitter_post(deal)
 
             patreon_ok = False
             x_ok = False
@@ -106,12 +108,17 @@ async def ingest(payload: IngestPayload, db: Any = Depends(get_db), x_api_key: O
             except Exception:
                 log.exception("Patreon publish failed")
 
-            try:
-                res = twitter_pub.publish(text)
-                if res.get("success"):
-                    x_ok = True
-            except Exception:
-                log.exception("Twitter publish failed")
+            twitter_configured = bool(settings.TWITTER_API_KEY and settings.TWITTER_ACCESS_TOKEN)
+            if twitter_configured:
+                text = generate_twitter_post(deal)
+                try:
+                    res = twitter_pub.publish(text)
+                    if res.get("success"):
+                        x_ok = True
+                except Exception:
+                    log.exception("Twitter publish failed")
+            else:
+                log.debug("Twitter not configured, skipping X post generation")
 
             # save published deal
             pd = PublishedDeal(

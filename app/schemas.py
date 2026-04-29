@@ -15,6 +15,7 @@ class DealIn(BaseModel):
     duration_days: Optional[int]
     ticket_url: Optional[HttpUrl]
     is_nearby: Optional[bool] = None
+    extra: Optional[str] = None
 
 
 class IngestPayload(BaseModel):

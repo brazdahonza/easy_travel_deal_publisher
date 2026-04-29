@@ -1,5 +1,6 @@
 import logging
 from ..config import settings
+from ..utils import notify_telegram
 import base64
 import json
 import pathlib
@@ -104,7 +105,8 @@ class PatreonPublisher:
                         except Exception as e:
                             log.warning(f"Image upload failed: {e}")
 
-                log.info("Post prepared as draft")
+                log.info("Post prepared as draft: %s", title)
+                notify_telegram(f"Patreon draft připraven: {title}")
 
                 # Persist updated cookies
                 try:
