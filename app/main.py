@@ -1,8 +1,8 @@
 import logging
-from fastapi import FastAPI, Header, HTTPException, Depends
-from typing import Optional
+from fastapi import FastAPI, Header, HTTPException, Depends, Query
+from typing import Optional, List
 from .config import settings
-from .schemas import IngestPayload, PatreonSessionPayload
+from .schemas import IngestPayload, PatreonSessionPayload, StatsOut, DeleteResult
 from .database import get_db
 from typing import Any
 from .deal_selector import filter_duplicates, select_with_llm, deal_hash, duration_bucket
@@ -10,7 +10,8 @@ from .post_generator import generate_patreon_post, generate_twitter_post
 from .publishers import PatreonPublisher, TwitterPublisher, SessionExpiredError
 from .utils import notify_telegram
 from .models import PublishedDeal, IngestLog, PublishedToEnum
-from datetime import datetime
+from datetime import datetime, timedelta
+from sqlalchemy import func
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="easy_travel_deal_publisher")
@@ -34,9 +35,21 @@ def create_tables():
 
 
 @app.get("/health")
-def health():
-    log.debug("❤️  Health check")
-    return {"status": "ok"}
+def health(db: Any = Depends(get_db)):
+    db_ok = False
+    try:
+        db.execute(func.now())
+        db_ok = True
+    except Exception:
+        pass
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "db": db_ok,
+        "patreon_session": bool(settings.PATREON_SESSION),
+        "twitter": bool(settings.TWITTER_API_KEY and settings.TWITTER_ACCESS_TOKEN),
+        "llm": bool(settings.ANTHROPIC_API_KEY),
+        "telegram": bool(settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID),
+    }
 
 
 def verify_api_key(x_api_key: Optional[str] = Header(None)):
@@ -249,7 +262,145 @@ def history(db: Any = Depends(get_db)):
 
 
 @app.get("/ingest-log")
-def ingest_log(db: Any = Depends(get_db)):
+def ingest_log_list(db: Any = Depends(get_db)):
     rows = db.query(IngestLog).order_by(IngestLog.received_at.desc()).limit(30).all()
     log.debug("📖 /ingest-log — returned %d rows", len(rows))
     return {"data": [r.__dict__ for r in rows]}
+
+
+# ── Deals ─────────────────────────────────────────────────────────────────────
+
+@app.get("/deals")
+def list_deals(
+    db: Any = Depends(get_db),
+    platform: Optional[str] = Query(None, description="Filter by platform: patreon | x | both"),
+    destination: Optional[str] = Query(None, description="Partial case-insensitive match"),
+    departure_city: Optional[str] = Query(None, description="Partial case-insensitive match"),
+    from_date: Optional[str] = Query(None, description="Published on or after (YYYY-MM-DD)"),
+    to_date: Optional[str] = Query(None, description="Published on or before (YYYY-MM-DD)"),
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    q = db.query(PublishedDeal)
+    if platform:
+        try:
+            q = q.filter(PublishedDeal.published_to == PublishedToEnum(platform))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid platform '{platform}'. Use: patreon, x, both")
+    if destination:
+        q = q.filter(PublishedDeal.destination.ilike(f"%{destination}%"))
+    if departure_city:
+        q = q.filter(PublishedDeal.departure_city.ilike(f"%{departure_city}%"))
+    if from_date:
+        try:
+            q = q.filter(PublishedDeal.published_at >= datetime.fromisoformat(from_date))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid from_date format, use YYYY-MM-DD")
+    if to_date:
+        try:
+            q = q.filter(PublishedDeal.published_at <= datetime.fromisoformat(to_date) + timedelta(days=1))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid to_date format, use YYYY-MM-DD")
+    total = q.count()
+    rows = q.order_by(PublishedDeal.published_at.desc()).offset(offset).limit(limit).all()
+    log.debug("📖 /deals — total=%d returned=%d", total, len(rows))
+    return {"total": total, "offset": offset, "limit": limit, "data": [r.__dict__ for r in rows]}
+
+
+@app.get("/deals/{deal_id}")
+def get_deal(deal_id: int, db: Any = Depends(get_db)):
+    row = db.query(PublishedDeal).filter(PublishedDeal.id == deal_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Deal not found")
+    return row.__dict__
+
+
+@app.delete("/deals/{deal_id}", response_model=DeleteResult)
+def delete_deal(deal_id: int, db: Any = Depends(get_db), x_api_key: Optional[str] = Depends(verify_api_key)):
+    row = db.query(PublishedDeal).filter(PublishedDeal.id == deal_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Deal not found")
+    db.delete(row)
+    db.commit()
+    log.info("🗑️  Deleted PublishedDeal #%d", deal_id)
+    return {"deleted": 1}
+
+
+@app.delete("/deals", response_model=DeleteResult)
+def delete_all_deals(db: Any = Depends(get_db), x_api_key: Optional[str] = Depends(verify_api_key)):
+    n = db.query(PublishedDeal).delete()
+    db.commit()
+    log.warning("🗑️  Deleted ALL %d PublishedDeal rows", n)
+    return {"deleted": n}
+
+
+@app.delete("/ingest-log", response_model=DeleteResult)
+def delete_ingest_log(db: Any = Depends(get_db), x_api_key: Optional[str] = Depends(verify_api_key)):
+    n = db.query(IngestLog).delete()
+    db.commit()
+    log.warning("🗑️  Deleted ALL %d IngestLog rows", n)
+    return {"deleted": n}
+
+
+# ── Stats ─────────────────────────────────────────────────────────────────────
+
+@app.get("/stats", response_model=StatsOut)
+def stats(db: Any = Depends(get_db)):
+    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+
+    total_deals = db.query(func.count(PublishedDeal.id)).scalar() or 0
+
+    platform_rows = (
+        db.query(PublishedDeal.published_to, func.count(PublishedDeal.id))
+        .group_by(PublishedDeal.published_to)
+        .all()
+    )
+    by_platform = {str(p): c for p, c in platform_rows}
+
+    ingest_total = db.query(func.count(IngestLog.id)).scalar() or 0
+    status_rows = (
+        db.query(IngestLog.status, func.count(IngestLog.id))
+        .group_by(IngestLog.status)
+        .all()
+    )
+    ingest_by_status = {s: c for s, c in status_rows}
+
+    avg_discount = db.query(func.avg(PublishedDeal.discount_pct)).scalar()
+    avg_price = db.query(func.avg(PublishedDeal.price)).scalar()
+    min_price = db.query(func.min(PublishedDeal.price)).scalar()
+    max_price = db.query(func.max(PublishedDeal.price)).scalar()
+
+    top_dest_rows = (
+        db.query(PublishedDeal.destination, func.count(PublishedDeal.id).label("n"))
+        .group_by(PublishedDeal.destination)
+        .order_by(func.count(PublishedDeal.id).desc())
+        .limit(5)
+        .all()
+    )
+    top_destinations = [{"destination": d, "count": c} for d, c in top_dest_rows]
+
+    last_7_deals = (
+        db.query(func.count(PublishedDeal.id))
+        .filter(PublishedDeal.published_at >= seven_days_ago)
+        .scalar() or 0
+    )
+    last_7_ingests = (
+        db.query(func.count(IngestLog.id))
+        .filter(IngestLog.received_at >= seven_days_ago)
+        .scalar() or 0
+    )
+
+    log.debug("📊 /stats — %d deals total", total_deals)
+    return StatsOut(
+        total_deals=total_deals,
+        by_platform=by_platform,
+        ingest_totals={"total": ingest_total},
+        ingest_by_status=ingest_by_status,
+        avg_discount_pct=round(avg_discount, 2) if avg_discount is not None else None,
+        avg_price=round(float(avg_price), 2) if avg_price is not None else None,
+        min_price=min_price,
+        max_price=max_price,
+        top_destinations=top_destinations,
+        last_7_days_deals=last_7_deals,
+        last_7_days_ingests=last_7_ingests,
+    )

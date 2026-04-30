@@ -47,6 +47,24 @@ class IngestLogOut(BaseModel):
     error_message: Optional[str]
 
 
+class StatsOut(BaseModel):
+    total_deals: int
+    by_platform: dict
+    ingest_totals: dict
+    ingest_by_status: dict
+    avg_discount_pct: Optional[float]
+    avg_price: Optional[float]
+    min_price: Optional[int]
+    max_price: Optional[int]
+    top_destinations: list
+    last_7_days_deals: int
+    last_7_days_ingests: int
+
+
+class DeleteResult(BaseModel):
+    deleted: int
+
+
 class PatreonCookie(BaseModel):
     name: str
     value: str
