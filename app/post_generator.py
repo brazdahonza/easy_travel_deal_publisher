@@ -37,12 +37,13 @@ Dostaneš strukturovaná data o dealu. Mohou zahrnovat:
 
 ### 1. Nadpis
 
-🔥 [DESTINACE velkými písmeny] [počet dní] za [celková cena] Kč! (-XX %) [1–2 emoji] ([co je zahrnuto])
+🔥 [DESTINACE velkými písmeny] ([země]) [počet dní] za [celková cena] Kč! (-XX %) [1–2 emoji] ([co je zahrnuto])
 
 - Celková cena = letenka + ubytování (pokud je). Pokud je jen letenka, uveď to v závorce.
 - Počet dní = počet nocí + 1. Pokud je jednosměrná letenka, vynech počet dní.
-- **Procentuální sleva MUSÍ být vždy uvedena v nadpisu** ve formátu `(-XX %)`, např.: `🔥 MALLORCA jednosměrně za 861 Kč! (-62 %) 🌴☀️`
-- Příklady závorek: `(Zpáteční letenky)`, `(Jednosměrná letenka)`, `(Letenky + hotel)`, `(Letenky + ubytování)`, `(Kompletní zájezd)`
+- **Země v závorce za destinací MUSÍ být uvedena v nadpisu** v češtině (např. `(Francie)`, `(Španělsko)`, `(Thajsko)`), pokud destinace není totožná se zemí. Pokud je destinace stejná jako země (např. Malta, Monako, Singapur, Lucembursko, Vatikán), závorku se zemí vynech. Pokud země není ve vstupních datech, doplň ji podle destinace.
+- **Procentuální sleva MUSÍ být vždy uvedena v nadpisu** ve formátu `(-XX %)`, např.: `🔥 MALLORCA (Španělsko) jednosměrně za 861 Kč! (-62 %) 🌴☀️`
+- Příklady závorek na konci: `(Zpáteční letenky)`, `(Jednosměrná letenka)`, `(Letenky + hotel)`, `(Letenky + ubytování)`, `(Kompletní zájezd)`
 
 ### 2. Úvodní odstavec
 
