@@ -10,7 +10,7 @@ class AnthropicWrapper:
         self.api_key = api_key or settings.ANTHROPIC_API_KEY
         try:
             import anthropic
-            self._client = anthropic.Client(self.api_key) if self.api_key else anthropic.Client()
+            self._client = anthropic.Anthropic(api_key=self.api_key) if self.api_key else anthropic.Anthropic()
         except Exception:
             self._client = None
 
@@ -32,9 +32,12 @@ class AnthropicWrapper:
             raise RuntimeError("Anthropic client unavailable")
 
         try:
-            resp = self._client.completions.create(model="claude-opus-4-5", prompt=prompt, max_tokens=350)
-            # response.text often holds content
-            text = getattr(resp, "text", None) or str(resp)
+            resp = self._client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=350,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = resp.content[0].text if resp.content else ""
             return {"raw": text}
         except Exception as e:
             log.exception("Anthropic call failed")
