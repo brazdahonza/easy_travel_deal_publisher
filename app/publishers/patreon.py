@@ -1,4 +1,5 @@
 import logging
+import unicodedata
 from ..config import settings
 from ..utils import notify_telegram
 import base64
@@ -27,12 +28,32 @@ class PatreonPublisher:
         else:
             log.warning("⚠️  PATREON_SESSION not set — Patreon publishing disabled")
 
+    @staticmethod
+    def _normalize(text: str) -> str:
+        nfkd = unicodedata.normalize("NFKD", text)
+        return "".join(c for c in nfkd if not unicodedata.combining(c)).lower().strip()
+
     def _get_image_path(self, destination: str) -> str:
         app_dir = pathlib.Path(__file__).parent.parent.parent
-        image_path = app_dir / "assets" / "patreon" / f"{destination}.png"
-        if image_path.exists():
-            log.info("🖼️  Image found for destination '%s': %s", destination, image_path)
-            return str(image_path)
+        patreon_dir = app_dir / "assets" / "patreon"
+        dest_norm = self._normalize(destination)
+
+        candidates = list(patreon_dir.glob("*.png"))
+
+        # Exact match against any " - "-separated variant in filename
+        for img_path in candidates:
+            variants = [v.strip() for v in img_path.stem.split(" - ")]
+            if any(self._normalize(v) == dest_norm for v in variants):
+                log.info("🖼️  Image found for destination '%s': %s", destination, img_path)
+                return str(img_path)
+
+        # Partial match: destination contained in any variant or vice-versa
+        for img_path in candidates:
+            variants = [v.strip() for v in img_path.stem.split(" - ")]
+            if any(dest_norm in self._normalize(v) or self._normalize(v) in dest_norm for v in variants):
+                log.info("🖼️  Fuzzy image match for destination '%s': %s", destination, img_path)
+                return str(img_path)
+
         log.warning("🖼️  No image found for destination '%s' — post will have no image", destination)
         return None
 
@@ -64,9 +85,12 @@ class PatreonPublisher:
 
                 # Step 1: Navigate home
                 log.info("🏠 Navigating to Patreon home...")
-                await page.goto("https://www.patreon.com/home", wait_until="networkidle")
+                await page.goto("https://www.patreon.com/home", wait_until="domcontentloaded", timeout=60000)
                 await page.wait_for_timeout(2000)
                 log.debug("🏠 Patreon home loaded — url=%s", page.url)
+
+                if "login" in page.url or "signup" in page.url:
+                    raise SessionExpiredError("Session expired — redirected to login")
 
                 # Step 2: Click Create button
                 log.info("🖱️  Clicking Create button...")
@@ -126,6 +150,13 @@ class PatreonPublisher:
                         log.info("🖼️  No image available for '%s' — skipping upload", destination)
 
                 log.info("✅ Patreon draft prepared — title='%s'", title)
+
+                # Navigate away to trigger Patreon's auto-save of the draft
+                log.info("💾 Navigating away to trigger draft save...")
+                await page.goto("https://www.patreon.com", wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(2000)
+                log.info("💾 Draft save triggered — url=%s", page.url)
+
                 notify_telegram(f"Patreon draft připraven: {title}")
 
                 # Persist updated cookies
@@ -137,7 +168,7 @@ class PatreonPublisher:
                     log.debug("⚠️  Failed to refresh session cookies: %s", e)
 
                 result = {"success": True, "url": page.url}
-                log.info("🎉 Patreon publish complete — url=%s", page.url)
+                log.info("🎉 Patreon publish complete — browser will close and restart for next post")
                 return result
 
             except Exception:
