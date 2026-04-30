@@ -17,22 +17,16 @@ def create_tables():
     # no teardown for in-memory sqlite
 
 
-def test_ingest_single_deal_skips_dedup_and_llm(monkeypatch):
-    """Single-deal batch must publish regardless of prior history and without LLM selection."""
+def test_ingest_single_deal_skips_llm(monkeypatch):
+    """Single-deal batch must publish without LLM selection."""
     client = TestClient(app)
 
-    filter_duplicates_called = []
     select_with_llm_called = []
-
-    def fake_filter(db, deals):
-        filter_duplicates_called.append(deals)
-        return []  # would normally filter everything out
 
     def fake_select(deals):
         select_with_llm_called.append(deals)
         return {"selected": [deals[0]["id"]], "justification": "ok"}
 
-    monkeypatch.setattr("app.main.filter_duplicates", fake_filter)
     monkeypatch.setattr("app.main.select_with_llm", fake_select)
 
     async def fake_patreon_publish(self, title, body_text, destination=None):
@@ -58,8 +52,6 @@ def test_ingest_single_deal_skips_dedup_and_llm(monkeypatch):
     assert data["status"] == "ok"
     assert data["selected"] == 1
     assert data["published"]["patreon"] is True
-    # dedup and LLM must NOT have been called
-    assert filter_duplicates_called == []
     assert select_with_llm_called == []
 
 

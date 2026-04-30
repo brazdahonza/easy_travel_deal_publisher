@@ -5,7 +5,7 @@ from .config import settings
 from .schemas import IngestPayload, PatreonSessionPayload, StatsOut, DeleteResult
 from .database import get_db
 from typing import Any
-from .deal_selector import filter_duplicates, select_with_llm, deal_hash, duration_bucket
+from .deal_selector import select_with_llm, deal_hash, duration_bucket
 from .post_generator import generate_patreon_post, generate_twitter_post
 from .publishers import PatreonPublisher, TwitterPublisher, SessionExpiredError
 from .utils import notify_telegram
@@ -97,32 +97,21 @@ async def ingest(payload: IngestPayload, db: Any = Depends(get_db), x_api_key: O
     log.debug("💾 IngestLog #%d created", ingest_log.id)
 
     try:
-        if len(payload.deals) == 1:
+        # ── Prepare deals ─────────────────────────────────────────────
+        deduped = []
+        for d in payload.deals:
+            d_dict = d.dict()
+            bucket = duration_bucket(d_dict.get("duration_days") or 0)
+            d_dict["_deal_hash"] = deal_hash(d_dict.get("destination", ""), d_dict.get("departure_city", ""), bucket)
+            d_dict["_duration_bucket"] = bucket
+            deduped.append(d_dict)
+
+        if len(deduped) == 1:
             # ── Single-deal fast path ──────────────────────────────────
-            log.info("📌 Single-deal batch — skipping deduplication and LLM selection")
-            deal_dicts = [d.dict() for d in payload.deals]
-            for d in deal_dicts:
-                bucket = duration_bucket(d.get("duration_days") or 0)
-                d["_deal_hash"] = deal_hash(d.get("destination", ""), d.get("departure_city", ""), bucket)
-                d["_duration_bucket"] = bucket
-            deduped = deal_dicts
+            log.info("📌 Single-deal batch — skipping LLM selection")
             selected_ids = [deduped[0]["id"]]
             ingest_log.selected_count = 1
         else:
-            # ── Deduplication ─────────────────────────────────────────
-            log.info("🔍 Running deduplication...")
-            deduped = filter_duplicates(db, [d.dict() for d in payload.deals])
-            filtered_count = len(payload.deals) - len(deduped)
-            log.info("🧹 Dedup done — %d filtered, %d remain", filtered_count, len(deduped))
-
-            if not deduped:
-                log.info("✋ All deals already published recently — nothing to do")
-                ingest_log.status = "no_new_deals"
-                ingest_log.selected_count = 0
-                db.add(ingest_log)
-                db.commit()
-                return {"status": "ok", "selected": 0, "published": {"patreon": False, "x": False}}
-
             # ── LLM selection ─────────────────────────────────────────
             log.info("🤖 Sending %d deals to LLM for selection...", len(deduped))
             selection = select_with_llm(deduped)

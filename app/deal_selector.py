@@ -1,6 +1,5 @@
 import hashlib
 from typing import List, Dict, Any
-from datetime import datetime, timedelta
 import logging
 from .config import settings
 
@@ -23,45 +22,6 @@ def deal_hash(destination: str, departure_city: str, duration_bucket_str: str) -
     s = f"{destination}|{departure_city}|{duration_bucket_str}"
     return hashlib.md5(s.encode("utf-8")).hexdigest()
 
-
-def filter_duplicates(db: Any, deals: List[Dict]) -> List[Dict]:
-    cutoff = datetime.utcnow() - timedelta(days=7)
-    log.debug("🔍 Dedup cutoff: %s (%d deals to check)", cutoff.strftime("%Y-%m-%d %H:%M"), len(deals))
-    filtered = []
-
-    for d in deals:
-        bucket = duration_bucket(d.get("duration_days") or 0)
-        h = deal_hash(d.get("destination", ""), d.get("departure_city", ""), bucket)
-        log.debug("  🔑 %s/%s [%s] → hash=%s", d.get("destination"), d.get("departure_city"), bucket, h)
-
-        try:
-            from .models import PublishedDeal
-        except Exception:
-            PublishedDeal = None
-
-        exists = None
-        if PublishedDeal is not None:
-            try:
-                exists = db.query(PublishedDeal).filter(
-                    PublishedDeal.deal_hash == h,
-                    PublishedDeal.published_at >= cutoff
-                ).first()
-            except Exception:
-                log.warning("⚠️  DB query failed during dedup for hash=%s", h)
-                exists = None
-
-        if not exists:
-            d["_deal_hash"] = h
-            d["_duration_bucket"] = bucket
-            filtered.append(d)
-            log.debug("  ✅ New deal — %s/%s", d.get("destination"), d.get("departure_city"))
-        else:
-            log.info("🧹 Duplicate filtered — %s/%s [%s] published_at=%s",
-                     d.get("destination"), d.get("departure_city"), bucket,
-                     exists.published_at.strftime("%Y-%m-%d") if exists.published_at else "?")
-
-    log.info("🔍 Dedup result — %d/%d deals passed", len(filtered), len(deals))
-    return filtered
 
 
 def build_anthropic_prompt(deals: List[Dict]) -> str:

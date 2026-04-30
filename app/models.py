@@ -26,7 +26,7 @@ try:
         published_to = Column(Enum(PublishedToEnum), nullable=True)
         post_text_patreon = Column(Text)
         post_text_x = Column(Text)
-        deal_hash = Column(String, unique=True, index=True, nullable=False)
+        deal_hash = Column(String, index=True, nullable=False)
 
 
     class IngestLog(Base):
