@@ -1,5 +1,63 @@
+from unittest.mock import MagicMock
+
 from app.post_generator import generate_patreon_post, generate_twitter_post
 
+
+# ── LLM path tests ────────────────────────────────────────────────────────────
+
+def test_patreon_post_calls_llm_when_api_key_configured(monkeypatch):
+    """generate_patreon_post must call AnthropicWrapper.generate_post when key is set."""
+    llm_title = "🔥 BANGKOK 8 dní za 8 500 Kč! (-45 %) ✈️ (Zpáteční letenky)"
+    llm_body = "Přistál jsem na skvělém dealu.\n· Termín: 1. 6. – 8. 6. 2026 📅"
+    llm_response = f"{llm_title}\n{llm_body}"
+
+    monkeypatch.setattr("app.config.settings.ANTHROPIC_API_KEY", "fake-key")
+
+    mock_instance = MagicMock()
+    mock_instance.generate_post.return_value = llm_response
+    monkeypatch.setattr("app.llm.AnthropicWrapper", MagicMock(return_value=mock_instance))
+
+    deal = {"destination": "Bangkok", "departure_city": "Praha", "price": 8500}
+    title, body = generate_patreon_post(deal)
+
+    mock_instance.generate_post.assert_called_once()
+    assert title == llm_title
+    assert body == llm_body
+
+
+def test_twitter_post_calls_llm_when_api_key_configured(monkeypatch):
+    """generate_twitter_post must call AnthropicWrapper.generate_post when key is set."""
+    llm_text = "Praha → Bangkok za 8 500 Kč. Přímý let, 7 nocí. ✈️ 🐿️\nhttps://t.co/x"
+
+    monkeypatch.setattr("app.config.settings.ANTHROPIC_API_KEY", "fake-key")
+
+    mock_instance = MagicMock()
+    mock_instance.generate_post.return_value = llm_text
+    monkeypatch.setattr("app.llm.AnthropicWrapper", MagicMock(return_value=mock_instance))
+
+    deal = {"destination": "Bangkok", "departure_city": "Praha", "price": 8500, "ticket_url": "https://t.co/x"}
+    text = generate_twitter_post(deal)
+
+    mock_instance.generate_post.assert_called_once()
+    assert text == llm_text
+
+
+def test_patreon_post_falls_back_on_llm_exception(monkeypatch):
+    """When LLM raises, generate_patreon_post must fall back to placeholder text."""
+    monkeypatch.setattr("app.config.settings.ANTHROPIC_API_KEY", "fake-key")
+
+    mock_instance = MagicMock()
+    mock_instance.generate_post.side_effect = RuntimeError("API error")
+    monkeypatch.setattr("app.llm.AnthropicWrapper", MagicMock(return_value=mock_instance))
+
+    deal = {"destination": "Bangkok", "departure_city": "Praha", "price": 8500}
+    title, body = generate_patreon_post(deal)
+
+    assert "Bangkok" in title
+    assert "Bangkok" in body
+
+
+# ── Fallback path tests ───────────────────────────────────────────────────────
 
 def test_patreon_post_returns_tuple():
     """Test that generate_patreon_post returns (title, body) tuple"""

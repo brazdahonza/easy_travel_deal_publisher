@@ -233,10 +233,13 @@ Pozor: jen příruční + víza na letišti (~1 300 Kč). Odlet 14. 6. na týden
 
 
 def generate_patreon_post(deal: Dict) -> Tuple[str, str]:
+    from .llm import AnthropicWrapper
+    from .config import settings
+    key = settings.ANTHROPIC_API_KEY
+    log.info("🔑 ANTHROPIC_API_KEY present: %s (len=%d)", bool(key), len(key) if key else 0)
     try:
-        from .llm import AnthropicWrapper
-        from .config import settings
-        if settings.ANTHROPIC_API_KEY:
+        if key:
+            log.info("📡 Calling LLM to generate Patreon post for destination=%s", deal.get("destination"))
             wrapper = AnthropicWrapper()
             text = wrapper.generate_post(deal, _PATREON_SYSTEM_PROMPT, max_tokens=1024)
             lines = text.split("\n", 1)
@@ -244,22 +247,31 @@ def generate_patreon_post(deal: Dict) -> Tuple[str, str]:
             body = lines[1].strip() if len(lines) > 1 else ""
             log.info("✅ Patreon post generated via LLM — title='%s' body=%d chars", title, len(body))
             return (title, body)
+        else:
+            log.warning("⚠️  ANTHROPIC_API_KEY not set — skipping LLM, using fallback for Patreon post")
     except Exception:
         log.exception("❌ LLM Patreon generation failed — using fallback")
+    log.info("📝 Using fallback Patreon post generator")
     return _fallback_patreon(deal)
 
 
 def generate_twitter_post(deal: Dict) -> str:
+    from .llm import AnthropicWrapper
+    from .config import settings
+    key = settings.ANTHROPIC_API_KEY
+    log.info("🔑 ANTHROPIC_API_KEY present: %s (len=%d)", bool(key), len(key) if key else 0)
     try:
-        from .llm import AnthropicWrapper
-        from .config import settings
-        if settings.ANTHROPIC_API_KEY:
+        if key:
+            log.info("📡 Calling LLM to generate Twitter post for destination=%s", deal.get("destination"))
             wrapper = AnthropicWrapper()
             text = wrapper.generate_post(deal, _X_SYSTEM_PROMPT, max_tokens=350)
             log.info("✅ Twitter post generated via LLM — %d chars", len(text))
             return text
+        else:
+            log.warning("⚠️  ANTHROPIC_API_KEY not set — skipping LLM, using fallback for Twitter post")
     except Exception:
         log.exception("❌ LLM Twitter generation failed — using fallback")
+    log.info("📝 Using fallback Twitter post generator")
     return _fallback_twitter(deal)
 
 
