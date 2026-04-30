@@ -239,22 +239,34 @@ async def _process_ingest(ingest_id: int, deals: List[dict]) -> None:
                 x_ok = False
                 text = None
 
-                try:
-                    log.info("🎨 Publishing to Patreon...")
-                    pub_result = await patreon_pub.publish(
-                        title=patreon_title,
-                        body_text=patreon_body,
-                        destination=deal.get("destination"),
-                    )
-                    patreon_ok = True
-                    log.info("✅ Patreon — published successfully")
-                    notify_telegram(_build_patreon_telegram_message(deal, patreon_title, pub_result))
-                except SessionExpiredError:
-                    log.error("❌ Patreon — session expired")
-                    notify_telegram("Patreon session expired for easy_travel_deal_publisher; renew session.")
-                    patreon_ok = False
-                except Exception:
-                    log.exception("❌ Patreon — publish failed")
+                import asyncio
+                max_attempts = 3
+                pub_result = None
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        log.info("🎨 Publishing to Patreon (attempt %d/%d)...", attempt, max_attempts)
+                        pub_result = await patreon_pub.publish(
+                            title=patreon_title,
+                            body_text=patreon_body,
+                            destination=deal.get("destination"),
+                        )
+                        patreon_ok = True
+                        log.info("✅ Patreon — published successfully on attempt %d", attempt)
+                        notify_telegram(_build_patreon_telegram_message(deal, patreon_title, pub_result))
+                        break
+                    except SessionExpiredError:
+                        log.error("❌ Patreon — session expired (no retry)")
+                        notify_telegram("Patreon session expired for easy_travel_deal_publisher; renew session.")
+                        patreon_ok = False
+                        break
+                    except Exception:
+                        log.exception("❌ Patreon — publish failed on attempt %d/%d", attempt, max_attempts)
+                        if attempt < max_attempts:
+                            backoff = 5 * attempt + (attempt - 1) * 2
+                            log.info("⏳ Retrying Patreon publish in %ds...", backoff)
+                            await asyncio.sleep(backoff)
+                        else:
+                            log.error("💥 Patreon — exhausted %d attempts, giving up", max_attempts)
 
                 twitter_configured = bool(settings.TWITTER_API_KEY and settings.TWITTER_ACCESS_TOKEN)
                 if twitter_configured:
