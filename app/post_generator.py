@@ -125,6 +125,16 @@ Středověké uličky Valletty, potápění u Blue Grotto a maltézská ftira na
 
 ---
 
+## Kvalita a gramatika
+
+- Piš vždy gramaticky správně — dbej na shodu podmětu s přísudkem, správné pádové koncovky a přirozený slovosled
+- Každá věta musí být úplná a smysluplná — žádné nedokončené fráze ani nesmyslné kombinace slov
+- Všechna čísla, data a ceny musí být konzistentní v celém textu — neměň údaje uprostřed příspěvku
+- Zmiňuj jen atrakce a místa, která skutečně existují v dané destinaci — neinventuj fakta
+- Před odesláním si celý příspěvek přečti a ověř, že každá věta dává smysl a logicky navazuje
+
+---
+
 ## Co nevypisovat
 
 - Žádné hashtagy
@@ -220,6 +230,16 @@ Minus 83 %. Ammán z Prahy za 1 517 Kč. 🐿️
 Mansaf v Rainbowské čtvrti, výhled z Citadely, víkend v Petře — za cenu jedné večeře v Praze.
 Pozor: jen příruční + víza na letišti (~1 300 Kč). Odlet 14. 6. na týden. ✈️
 [odkaz]
+
+---
+
+## Kvalita a gramatika
+
+- Piš vždy gramaticky správně — dbej na shodu podmětu s přísudkem, správné pádové koncovky a přirozený slovosled
+- Každá věta musí být úplná a smysluplná — žádné nedokončené fráze ani nesmyslné kombinace slov
+- Všechna čísla a ceny musí být konzistentní v celém příspěvku
+- Zmiňuj jen atrakce a místa, která skutečně existují v dané destinaci — neinventuj fakta
+- Celý příspěvek musí dávat smysl jako celek — zkontroluj, že věty logicky navazují
 
 ---
 
