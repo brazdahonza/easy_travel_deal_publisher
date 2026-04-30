@@ -1,7 +1,7 @@
 import logging
+import re
 import unicodedata
 from ..config import settings
-from ..utils import notify_telegram
 import base64
 import json
 import pathlib
@@ -307,13 +307,21 @@ class PatreonPublisher:
                 log.info("⏳ Waiting 5s for autosave to capture content...")
                 await page.wait_for_timeout(5000)
 
+                # Capture composer/draft URL before navigating away.
+                # Patreon composer URL contains the post id (e.g. /posts/<id>/edit or ?postId=<id>).
+                draft_url = page.url
+                post_id = None
+                m = re.search(r"/posts/(\d+)", draft_url) or re.search(r"[?&]postId=(\d+)", draft_url)
+                if m:
+                    post_id = m.group(1)
+                    draft_url = f"https://www.patreon.com/posts/{post_id}/edit"
+                log.info("🔗 Captured draft URL — %s (post_id=%s)", draft_url, post_id or "n/a")
+
                 # Navigate away to trigger Patreon's auto-save of the draft
                 log.info("💾 Navigating away to trigger draft save...")
                 await page.goto("https://www.patreon.com", wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(2000)
                 log.info("💾 Draft save triggered — url=%s", page.url)
-
-                notify_telegram(f"Patreon draft připraven: {title}")
 
                 # Persist updated cookies
                 try:
@@ -323,7 +331,7 @@ class PatreonPublisher:
                 except Exception as e:
                     log.debug("⚠️  Failed to refresh session cookies: %s", e)
 
-                result = {"success": True, "url": page.url}
+                result = {"success": True, "url": page.url, "draft_url": draft_url, "post_id": post_id}
                 log.info("🎉 Patreon publish complete — browser will close and restart for next post")
                 return result
 

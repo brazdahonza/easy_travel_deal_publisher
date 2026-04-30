@@ -65,6 +65,10 @@ class DeleteResult(BaseModel):
     deleted: int
 
 
+class PublishXPayload(BaseModel):
+    text: str = Field(..., min_length=1, max_length=4000)
+
+
 class PatreonCookie(BaseModel):
     name: str
     value: str

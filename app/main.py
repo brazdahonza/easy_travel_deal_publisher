@@ -2,7 +2,7 @@ import logging
 from fastapi import FastAPI, Header, HTTPException, Depends, Query, BackgroundTasks
 from typing import Optional, List
 from .config import settings
-from .schemas import IngestPayload, PatreonSessionPayload, StatsOut, DeleteResult
+from .schemas import IngestPayload, PatreonSessionPayload, PublishXPayload, StatsOut, DeleteResult
 from .database import get_db
 from typing import Any
 from .deal_selector import select_with_llm, deal_hash, duration_bucket
@@ -81,6 +81,23 @@ def set_patreon_session(payload: PatreonSessionPayload, x_api_key: Optional[str]
     }
 
 
+@app.post("/publish/x")
+def publish_x(payload: PublishXPayload, x_api_key: Optional[str] = Depends(verify_api_key)):
+    """Publish a verbatim tweet text to X. Used by moderators to push edited posts."""
+    log.info("🐦 /publish/x — verbatim publish requested (%d chars)", len(payload.text))
+    pub = TwitterPublisher()
+    try:
+        res = pub.publish(payload.text)
+    except Exception as exc:
+        log.exception("❌ /publish/x — twitter publish raised")
+        raise HTTPException(status_code=502, detail=f"twitter_error: {exc}")
+    if not res.get("success"):
+        reason = res.get("reason") or "twitter_publish_failed"
+        log.warning("⚠️  /publish/x — publish unsuccessful: %s", reason)
+        raise HTTPException(status_code=502, detail=reason)
+    return {"status": "ok", "tweet_id": res.get("tweet_id")}
+
+
 @app.post("/ingest")
 async def ingest(
     payload: IngestPayload,
@@ -113,6 +130,41 @@ async def ingest(
         "ingest_id": ingest_id,
         "deals_count": len(payload.deals),
     }
+
+
+def _build_patreon_telegram_message(deal: dict, title: str, pub_result: dict) -> str:
+    """Compose Telegram notification with deal details + Patreon draft URL."""
+    destination = deal.get("destination") or "?"
+    departure = deal.get("departure_city") or "?"
+    price = deal.get("price")
+    median = deal.get("median_price")
+    discount = deal.get("discount_pct")
+    date_from = deal.get("date_from")
+    date_to = deal.get("date_to")
+    duration = deal.get("duration_days")
+    ticket_url = deal.get("ticket_url")
+    draft_url = (pub_result or {}).get("draft_url") or (pub_result or {}).get("url")
+
+    lines = [
+        f"📝 Patreon draft připraven: {title}",
+        f"✈️  {departure} → {destination}",
+    ]
+    if price is not None:
+        price_line = f"💰 {price} Kč"
+        if median:
+            price_line += f" (medián {median} Kč)"
+        if discount is not None:
+            price_line += f" • sleva {discount:.0f}%"
+        lines.append(price_line)
+    if date_from or date_to:
+        lines.append(f"📅 {date_from or '?'} → {date_to or '?'}" + (f" ({duration} dní)" if duration else ""))
+    elif duration:
+        lines.append(f"📅 {duration} dní")
+    if ticket_url:
+        lines.append(f"🎟  {ticket_url}")
+    if draft_url:
+        lines.append(f"🔗 Draft: {draft_url}")
+    return "\n".join(lines)
 
 
 async def _process_ingest(ingest_id: int, deals: List[dict]) -> None:
@@ -189,13 +241,14 @@ async def _process_ingest(ingest_id: int, deals: List[dict]) -> None:
 
                 try:
                     log.info("🎨 Publishing to Patreon...")
-                    await patreon_pub.publish(
+                    pub_result = await patreon_pub.publish(
                         title=patreon_title,
                         body_text=patreon_body,
                         destination=deal.get("destination"),
                     )
                     patreon_ok = True
                     log.info("✅ Patreon — published successfully")
+                    notify_telegram(_build_patreon_telegram_message(deal, patreon_title, pub_result))
                 except SessionExpiredError:
                     log.error("❌ Patreon — session expired")
                     notify_telegram("Patreon session expired for easy_travel_deal_publisher; renew session.")
