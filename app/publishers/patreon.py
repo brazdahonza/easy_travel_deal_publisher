@@ -103,10 +103,33 @@ class PatreonPublisher:
 
         log.info("🎨 Starting Patreon publish — title='%s' destination=%s", title, destination or "n/a")
 
+        try:
+            from playwright_stealth import Stealth
+        except ImportError:
+            Stealth = None
+            log.warning("⚠️  playwright-stealth not installed — bot detection more likely in headless mode")
+
         async with async_playwright() as p:
-            log.debug("🌐 Launching Chromium browser (headless=True)")
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context()
+            headless = settings.PATREON_HEADLESS
+            slow_mo = settings.PATREON_SLOWMO_MS
+            log.debug("🌐 Launching Chromium browser (headless=%s, slow_mo=%dms, stealth=%s)", headless, slow_mo, Stealth is not None)
+            browser = await p.chromium.launch(
+                headless=headless,
+                slow_mo=slow_mo,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/130.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1440, "height": 900},
+                locale="en-US",
+            )
+            if Stealth is not None:
+                await Stealth().apply_stealth_async(context)
+                log.debug("🥷 Stealth evasions applied to context")
 
             try:
                 cookies = self.session.get("cookies", [])

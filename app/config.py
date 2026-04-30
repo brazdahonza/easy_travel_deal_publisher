@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     NEARBY_COUNTRIES: Optional[str] = None
     CREATOR_EDITOR_URL: str = "https://www.patreon.com/creator/posts/new"
     PATREON_DRY_RUN: bool = False
+    PATREON_HEADLESS: bool = True
+    PATREON_SLOWMO_MS: int = 0
 
 
 settings = Settings()
