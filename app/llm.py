@@ -66,6 +66,8 @@ class AnthropicWrapper:
         def _default(obj):
             if isinstance(obj, (datetime.date, datetime.datetime)):
                 return obj.isoformat()
+            if hasattr(obj, "__str__"):
+                return str(obj)
             raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
         user_msg = json.dumps(
