@@ -57,6 +57,39 @@ class PatreonPublisher:
         log.warning("🖼️  No image found for destination '%s' — post will have no image", destination)
         return None
 
+    @staticmethod
+    async def _find_first_visible(page, selectors: list, timeout_ms: int = 10000):
+        """Try multiple selectors, return first that becomes visible. Raise TimeoutError if none."""
+        import asyncio
+        per_try = max(1500, timeout_ms // max(1, len(selectors)))
+        last_err = None
+        for sel in selectors:
+            try:
+                loc = page.locator(sel).first
+                await loc.wait_for(state="visible", timeout=per_try)
+                log.debug("✅ Matched selector: %s", sel)
+                return loc
+            except Exception as e:
+                last_err = e
+                log.debug("⚠️  Selector miss: %s", sel)
+        raise last_err if last_err else RuntimeError("No selectors matched")
+
+    async def _dump_diagnostics(self, page, tag: str):
+        """Save screenshot + HTML for post-mortem when selectors fail."""
+        try:
+            out_dir = pathlib.Path("/tmp/patreon_debug")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            import time
+            stamp = int(time.time())
+            shot = out_dir / f"{tag}_{stamp}.png"
+            html = out_dir / f"{tag}_{stamp}.html"
+            await page.screenshot(path=str(shot), full_page=True)
+            content = await page.content()
+            html.write_text(content, encoding="utf-8")
+            log.error("📸 Diagnostics saved — url=%s screenshot=%s html=%s", page.url, shot, html)
+        except Exception as e:
+            log.warning("⚠️  Failed to dump diagnostics: %s", e)
+
     async def publish(self, title: str, body_text: str, destination: str = None) -> dict:
         if not self.session:
             log.error("❌ Cannot publish — Patreon session missing or invalid")
@@ -93,56 +126,128 @@ class PatreonPublisher:
                 if "login" in page.url or "signup" in page.url:
                     raise SessionExpiredError("Session expired — redirected to login")
 
-                # Step 2: Navigate to post creation (try button first, fall back to direct URL)
-                log.info("🖱️  Navigating to post creation...")
+                # Step 2+3: Open post composer via Create button → Post option in dropdown.
+                # Direct URL (/posts/create) no longer exists — must drive UI.
                 _create_selectors = [
                     '[data-tag="create-content-button"]',
                     'button[aria-label*="Create"]',
-                    'a[href*="posts/create"]',
                     'button:has-text("Create")',
                 ]
-                _clicked = False
-                for sel in _create_selectors:
+                MAX_FLOW_ATTEMPTS = 3
+                composer_ready = False
+                for attempt in range(1, MAX_FLOW_ATTEMPTS + 1):
+                    log.info("🖱️  Opening composer (attempt %d/%d)...", attempt, MAX_FLOW_ATTEMPTS)
+
+                    # Click Create
+                    create_clicked = False
+                    for sel in _create_selectors:
+                        try:
+                            btn = page.locator(sel).first
+                            await btn.wait_for(state="visible", timeout=5000)
+                            await btn.click()
+                            await page.wait_for_timeout(1000)
+                            log.debug("✅ Create clicked via: %s", sel)
+                            create_clicked = True
+                            break
+                        except Exception:
+                            log.debug("⚠️  Create selector miss: %s", sel)
+
+                    if not create_clicked:
+                        log.warning("⚠️  Create button not found — reloading home and retrying")
+                        await page.goto("https://www.patreon.com/home", wait_until="domcontentloaded", timeout=60000)
+                        await page.wait_for_timeout(3000)
+                        continue
+
+                    # Click Post option in dropdown
+                    post_selectors = [
+                        'a:has([data-tag="IconPosts"])',
+                        'button:has([data-tag="IconPosts"])',
+                        '[role="menuitem"]:has-text("Post")',
+                        'a:has-text("Post")',
+                    ]
+                    post_clicked = False
+                    for sel in post_selectors:
+                        try:
+                            opt = page.locator(sel).first
+                            await opt.wait_for(state="visible", timeout=5000)
+                            await opt.click()
+                            await page.wait_for_timeout(2000)
+                            log.debug("✅ Post option clicked via: %s — url=%s", sel, page.url)
+                            post_clicked = True
+                            break
+                        except Exception:
+                            log.debug("⚠️  Post option selector miss: %s", sel)
+
+                    if not post_clicked:
+                        log.warning("⚠️  Post option not found in dropdown — restarting flow")
+                        await page.goto("https://www.patreon.com/home", wait_until="domcontentloaded", timeout=60000)
+                        await page.wait_for_timeout(3000)
+                        continue
+
+                    # Wait for composer to settle
                     try:
-                        btn = page.locator(sel).first
-                        await btn.wait_for(state="visible", timeout=5000)
-                        await btn.click()
-                        await page.wait_for_timeout(1000)
-                        log.debug("✅ Create button clicked via selector: %s", sel)
-                        _clicked = True
+                        await page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        log.debug("⚠️  networkidle not reached within 15s — proceeding")
+                    await page.wait_for_timeout(2000)
+
+                    if "login" in page.url or "signup" in page.url:
+                        await self._dump_diagnostics(page, "composer_redirected_login")
+                        raise SessionExpiredError("Session expired during composer flow")
+
+                    # Verify composer mounted by probing for title textarea
+                    try:
+                        await page.locator('textarea[placeholder="Title"], input[placeholder="Title"], [aria-label="Title"]').first.wait_for(state="visible", timeout=8000)
+                        composer_ready = True
+                        log.info("✅ Composer ready — url=%s", page.url)
                         break
                     except Exception:
-                        log.debug("⚠️  Selector not found: %s", sel)
+                        log.warning("⚠️  Composer did not mount title field — restarting flow")
+                        await self._dump_diagnostics(page, f"composer_not_ready_attempt{attempt}")
+                        await page.goto("https://www.patreon.com/home", wait_until="domcontentloaded", timeout=60000)
+                        await page.wait_for_timeout(3000)
 
-                if _clicked:
-                    # Step 3: Select Post from dropdown (only if button opened a menu)
-                    log.info("🖱️  Selecting Post option from dropdown...")
-                    try:
-                        post_option = page.locator('a:has([data-tag="IconPosts"])')
-                        await post_option.wait_for(state="visible", timeout=5000)
-                        await post_option.click()
-                        await page.wait_for_timeout(2000)
-                        log.debug("✅ Post option selected — url=%s", page.url)
-                    except Exception:
-                        log.debug("⚠️  Dropdown post option not found — may have navigated directly")
-                else:
-                    log.info("🔗 Falling back to direct post creation URL")
-                    await page.goto("https://www.patreon.com/posts/create", wait_until="domcontentloaded", timeout=30000)
-                    await page.wait_for_timeout(3000)
-                    log.debug("✅ Navigated to post creation — url=%s", page.url)
+                if not composer_ready:
+                    raise RuntimeError(f"Failed to reach Patreon post composer after {MAX_FLOW_ATTEMPTS} attempts")
 
-                # Step 4: Fill title
+                # Step 4: Fill title (multi-selector fallback — Patreon UI changes frequently)
                 log.info("✏️  Filling title field: '%s'", title)
-                title_field = page.locator('textarea[placeholder="Title"]')
-                await title_field.wait_for(state="visible", timeout=10000)
+                title_selectors = [
+                    'textarea[placeholder="Title"]',
+                    'input[placeholder="Title"]',
+                    'textarea[name="title"]',
+                    'input[name="title"]',
+                    '[data-tag="post-title-field"]',
+                    '[data-tag="post-title"]',
+                    '[aria-label="Title"]',
+                    '[aria-label="Post title"]',
+                    'textarea[placeholder*="title" i]',
+                    'input[placeholder*="title" i]',
+                ]
+                try:
+                    title_field = await self._find_first_visible(page, title_selectors, timeout_ms=20000)
+                except Exception:
+                    await self._dump_diagnostics(page, "title_not_found")
+                    raise
                 await title_field.fill(title)
                 await page.wait_for_timeout(500)
                 log.debug("✅ Title filled")
 
                 # Step 5: Fill body (ProseMirror/Remirror — .fill() doesn't dispatch editor events)
                 log.info("✏️  Filling body field (%d chars)...", len(body_text))
-                body_field = page.locator('div[contenteditable="true"][aria-label="Text input field for post content"]')
-                await body_field.wait_for(state="visible", timeout=10000)
+                body_selectors = [
+                    'div[contenteditable="true"][aria-label="Text input field for post content"]',
+                    'div[contenteditable="true"][aria-label*="post content" i]',
+                    'div[contenteditable="true"][aria-label*="body" i]',
+                    'div[role="textbox"][contenteditable="true"]',
+                    'div.ProseMirror[contenteditable="true"]',
+                    'div[contenteditable="true"]',
+                ]
+                try:
+                    body_field = await self._find_first_visible(page, body_selectors, timeout_ms=15000)
+                except Exception:
+                    await self._dump_diagnostics(page, "body_not_found")
+                    raise
                 await body_field.click()
                 await page.keyboard.press("Control+a")
                 await page.keyboard.type(body_text)
