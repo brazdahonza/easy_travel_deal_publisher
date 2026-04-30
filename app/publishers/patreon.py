@@ -126,6 +126,7 @@ class PatreonPublisher:
                 ),
                 viewport={"width": 1440, "height": 900},
                 locale="en-US",
+                permissions=["clipboard-read", "clipboard-write"],
             )
             if Stealth is not None:
                 await Stealth(
@@ -213,8 +214,9 @@ class PatreonPublisher:
                     await self._dump_diagnostics(page, "body_not_found")
                     raise
                 await body_field.click()
+                await page.evaluate("(text) => navigator.clipboard.writeText(text)", body_text)
                 await page.keyboard.press("Control+a")
-                await page.keyboard.type(body_text)
+                await page.keyboard.press("Control+v")
                 await page.wait_for_timeout(500)
                 log.debug("✅ Body filled")
 
