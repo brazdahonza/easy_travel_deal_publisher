@@ -17,6 +17,26 @@ def create_tables():
     # no teardown for in-memory sqlite
 
 
+def _read_ingest_log(ingest_id):
+    from app.database import SessionLocal
+    from app.models import IngestLog
+    db = SessionLocal()
+    try:
+        return db.query(IngestLog).filter(IngestLog.id == ingest_id).first()
+    finally:
+        db.close()
+
+
+def _read_published_deals():
+    from app.database import SessionLocal
+    from app.models import PublishedDeal
+    db = SessionLocal()
+    try:
+        return db.query(PublishedDeal).all()
+    finally:
+        db.close()
+
+
 def test_ingest_single_deal_skips_llm(monkeypatch):
     """Single-deal batch must publish without LLM selection."""
     client = TestClient(app)
@@ -49,10 +69,18 @@ def test_ingest_single_deal_skips_llm(monkeypatch):
     r = client.post("/ingest", json=payload)
     assert r.status_code == 200
     data = r.json()
-    assert data["status"] == "ok"
-    assert data["selected"] == 1
-    assert data["published"]["patreon"] is True
+    assert data["status"] == "accepted"
+    assert data["deals_count"] == 1
+    assert isinstance(data["ingest_id"], int)
+
+    # background task runs after response — TestClient awaits it before returning
+    log_row = _read_ingest_log(data["ingest_id"])
+    assert log_row.status == "done"
+    assert log_row.selected_count == 1
     assert select_with_llm_called == []
+
+    pd_rows = _read_published_deals()
+    assert any(p.destination == "Tokyo" for p in pd_rows)
 
 
 def test_ingest_pipeline(monkeypatch):
@@ -90,7 +118,13 @@ def test_ingest_pipeline(monkeypatch):
     r = client.post("/ingest", json=payload)
     assert r.status_code == 200
     data = r.json()
-    assert data["status"] == "ok"
-    assert data["selected"] == 2
-    assert data["published"]["patreon"] is True
-    assert data["published"]["x"] is True
+    assert data["status"] == "accepted"
+    assert data["deals_count"] == 2
+    assert isinstance(data["ingest_id"], int)
+
+    log_row = _read_ingest_log(data["ingest_id"])
+    assert log_row.status == "done"
+    assert log_row.selected_count == 2
+
+    destinations = {p.destination for p in _read_published_deals()}
+    assert {"Bali", "Lisbon"}.issubset(destinations)

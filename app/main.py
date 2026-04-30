@@ -1,5 +1,5 @@
 import logging
-from fastapi import FastAPI, Header, HTTPException, Depends, Query
+from fastapi import FastAPI, Header, HTTPException, Depends, Query, BackgroundTasks
 from typing import Optional, List
 from .config import settings
 from .schemas import IngestPayload, PatreonSessionPayload, StatsOut, DeleteResult
@@ -82,7 +82,12 @@ def set_patreon_session(payload: PatreonSessionPayload, x_api_key: Optional[str]
 
 
 @app.post("/ingest")
-async def ingest(payload: IngestPayload, db: Any = Depends(get_db), x_api_key: Optional[str] = Depends(verify_api_key)):
+async def ingest(
+    payload: IngestPayload,
+    background_tasks: BackgroundTasks,
+    db: Any = Depends(get_db),
+    x_api_key: Optional[str] = Depends(verify_api_key),
+):
     log.info("━" * 60)
     log.info("📥 Ingest received — %d deals in batch", len(payload.deals))
     for deal in payload.deals:
@@ -92,156 +97,180 @@ async def ingest(payload: IngestPayload, db: Any = Depends(get_db), x_api_key: O
             f"{deal.discount_pct:.1f}" if deal.discount_pct else "n/a",
         )
 
-    ingest_log = IngestLog(deals_count=len(payload.deals), status="processing")
+    ingest_log = IngestLog(deals_count=len(payload.deals), status="queued")
     db.add(ingest_log)
     db.commit()
-    log.debug("💾 IngestLog #%d created", ingest_log.id)
+    db.refresh(ingest_log)
+    ingest_id = ingest_log.id
+    log.debug("💾 IngestLog #%d queued", ingest_id)
 
+    deals_payload = [d.dict() for d in payload.deals]
+    background_tasks.add_task(_process_ingest, ingest_id, deals_payload)
+
+    log.info("✅ Ingest #%d accepted — processing in background", ingest_id)
+    return {
+        "status": "accepted",
+        "ingest_id": ingest_id,
+        "deals_count": len(payload.deals),
+    }
+
+
+async def _process_ingest(ingest_id: int, deals: List[dict]) -> None:
+    """Run selection + publishing pipeline asynchronously after /ingest responds."""
+    from .database import SessionLocal
+    if SessionLocal is None:
+        log.error("❌ DB unavailable — cannot process ingest #%d", ingest_id)
+        return
+
+    db = SessionLocal()
     try:
-        # ── Prepare deals ─────────────────────────────────────────────
-        deduped = []
-        for d in payload.deals:
-            d_dict = d.dict()
-            bucket = duration_bucket(d_dict.get("duration_days") or 0)
-            d_dict["_deal_hash"] = deal_hash(d_dict.get("destination", ""), d_dict.get("departure_city", ""), bucket)
-            d_dict["_duration_bucket"] = bucket
-            deduped.append(d_dict)
+        ingest_log = db.query(IngestLog).filter(IngestLog.id == ingest_id).first()
+        if ingest_log is None:
+            log.error("❌ IngestLog #%d not found — aborting background processing", ingest_id)
+            return
+        ingest_log.status = "processing"
+        db.commit()
 
-        if len(deduped) == 1:
-            # ── Single-deal fast path ──────────────────────────────────
-            log.info("📌 Single-deal batch — skipping LLM selection")
-            selected_ids = [deduped[0]["id"]]
-            ingest_log.selected_count = 1
-        else:
-            # ── LLM selection ─────────────────────────────────────────
-            log.info("🤖 Sending %d deals to LLM for selection...", len(deduped))
-            selection = select_with_llm(deduped)
-
-            if selection.get("error"):
-                log.error("❌ LLM selection failed: %s", selection["error"])
-                ingest_log.status = "llm_error"
-                ingest_log.error_message = selection.get("error")
-                db.add(ingest_log)
-                db.commit()
-                return {"status": "ok", "error": selection.get("error"), "selected": 0, "published": {"patreon": False, "x": False}}
-
-            selected_ids = selection.get("selected", [])[:2]
-            log.info("🎯 LLM selected %d deal(s): %s", len(selected_ids), selected_ids)
-            if selection.get("justification"):
-                log.info("💬 LLM justification: %s", selection["justification"])
-            ingest_log.selected_count = len(selected_ids)
-
-        patreon_pub = PatreonPublisher()
-        twitter_pub = TwitterPublisher()
-        published_summary = {"patreon": False, "x": False}
-
-        # ── Publish each selected deal ─────────────────────────────
-        for idx, sid in enumerate(selected_ids, 1):
-            deal = next((d for d in deduped if d.get("id") == sid), None)
-            if not deal:
-                log.warning("⚠️  Deal id=%s not found in deduped list — skipping", sid)
-                continue
-
-            log.info("─" * 50)
-            log.info("📢 Publishing deal %d/%d — id=%s destination=%s price=%s CZK",
-                     idx, len(selected_ids), sid, deal.get("destination"), deal.get("price"))
-
-            # ── Patreon ───────────────────────────────────────────
-            log.info("🎨 Generating Patreon post...")
-            patreon_title, patreon_body = generate_patreon_post(deal)
-            log.info("📝 Patreon title: %s", patreon_title)
-
-            patreon_ok = False
-            x_ok = False
-            text = None
-
-            try:
-                log.info("🎨 Publishing to Patreon...")
-                await patreon_pub.publish(
-                    title=patreon_title,
-                    body_text=patreon_body,
-                    destination=deal.get("destination")
+        try:
+            # ── Prepare deals ─────────────────────────────────────────
+            deduped = []
+            for d_dict in deals:
+                bucket = duration_bucket(d_dict.get("duration_days") or 0)
+                d_dict["_deal_hash"] = deal_hash(
+                    d_dict.get("destination", ""),
+                    d_dict.get("departure_city", ""),
+                    bucket,
                 )
-                patreon_ok = True
-                log.info("✅ Patreon — published successfully")
-            except SessionExpiredError:
-                log.error("❌ Patreon — session expired")
-                notify_telegram("Patreon session expired for easy_travel_deal_publisher; renew session.")
-                patreon_ok = False
-            except Exception:
-                log.exception("❌ Patreon — publish failed")
+                d_dict["_duration_bucket"] = bucket
+                deduped.append(d_dict)
 
-            # ── Twitter ───────────────────────────────────────────
-            twitter_configured = bool(settings.TWITTER_API_KEY and settings.TWITTER_ACCESS_TOKEN)
-            if twitter_configured:
-                log.info("🐦 Generating Twitter post...")
-                text = generate_twitter_post(deal)
-                log.info("📝 Twitter text (%d chars): %s", len(text), text)
-                try:
-                    log.info("🐦 Publishing to X/Twitter...")
-                    res = twitter_pub.publish(text)
-                    if res.get("success"):
-                        x_ok = True
-                        log.info("✅ Twitter — published successfully")
-                    else:
-                        log.warning("⚠️  Twitter — publish returned non-success: %s", res)
-                except Exception:
-                    log.exception("❌ Twitter — publish failed")
+            if len(deduped) == 1:
+                log.info("📌 Single-deal batch — skipping LLM selection")
+                selected_ids = [deduped[0]["id"]]
+                ingest_log.selected_count = 1
             else:
-                log.info("🐦 Twitter not configured — skipping")
+                log.info("🤖 Sending %d deals to LLM for selection...", len(deduped))
+                selection = select_with_llm(deduped)
 
-            # ── Persist ───────────────────────────────────────────
-            published_to = (
-                PublishedToEnum.both if patreon_ok and x_ok
-                else (PublishedToEnum.patreon if patreon_ok
-                      else (PublishedToEnum.x if x_ok else None))
-            )
+                if selection.get("error"):
+                    log.error("❌ LLM selection failed: %s", selection["error"])
+                    ingest_log.status = "llm_error"
+                    ingest_log.error_message = selection.get("error")
+                    db.commit()
+                    return
 
-            if published_to is None:
-                log.warning("⚠️  Deal id=%s — nothing published, skipping DB write", sid)
-                continue
+                selected_ids = selection.get("selected", [])[:2]
+                log.info("🎯 LLM selected %d deal(s): %s", len(selected_ids), selected_ids)
+                if selection.get("justification"):
+                    log.info("💬 LLM justification: %s", selection["justification"])
+                ingest_log.selected_count = len(selected_ids)
 
-            log.info("💾 Saving PublishedDeal — patreon=%s x=%s published_to=%s",
-                     patreon_ok, x_ok, published_to)
+            patreon_pub = PatreonPublisher()
+            twitter_pub = TwitterPublisher()
+            published_summary = {"patreon": False, "x": False}
 
-            pd = PublishedDeal(
-                destination=deal.get("destination"),
-                departure_city=deal.get("departure_city"),
-                price=deal.get("price"),
-                median_price=deal.get("median_price"),
-                discount_pct=deal.get("discount_pct"),
-                date_from=deal.get("date_from"),
-                date_to=deal.get("date_to"),
-                duration_days=deal.get("duration_days"),
-                published_at=datetime.utcnow(),
-                published_to=published_to,
-                post_text_patreon=patreon_body if patreon_ok else None,
-                post_text_x=text if x_ok else None,
-                deal_hash=deal.get("_deal_hash"),
-            )
-            db.add(pd)
+            for idx, sid in enumerate(selected_ids, 1):
+                deal = next((d for d in deduped if d.get("id") == sid), None)
+                if not deal:
+                    log.warning("⚠️  Deal id=%s not found in deduped list — skipping", sid)
+                    continue
+
+                log.info("─" * 50)
+                log.info("📢 Publishing deal %d/%d — id=%s destination=%s price=%s CZK",
+                         idx, len(selected_ids), sid, deal.get("destination"), deal.get("price"))
+
+                log.info("🎨 Generating Patreon post...")
+                patreon_title, patreon_body = generate_patreon_post(deal)
+                log.info("📝 Patreon title: %s", patreon_title)
+
+                patreon_ok = False
+                x_ok = False
+                text = None
+
+                try:
+                    log.info("🎨 Publishing to Patreon...")
+                    await patreon_pub.publish(
+                        title=patreon_title,
+                        body_text=patreon_body,
+                        destination=deal.get("destination"),
+                    )
+                    patreon_ok = True
+                    log.info("✅ Patreon — published successfully")
+                except SessionExpiredError:
+                    log.error("❌ Patreon — session expired")
+                    notify_telegram("Patreon session expired for easy_travel_deal_publisher; renew session.")
+                    patreon_ok = False
+                except Exception:
+                    log.exception("❌ Patreon — publish failed")
+
+                twitter_configured = bool(settings.TWITTER_API_KEY and settings.TWITTER_ACCESS_TOKEN)
+                if twitter_configured:
+                    log.info("🐦 Generating Twitter post...")
+                    text = generate_twitter_post(deal)
+                    log.info("📝 Twitter text (%d chars): %s", len(text), text)
+                    try:
+                        log.info("🐦 Publishing to X/Twitter...")
+                        res = twitter_pub.publish(text)
+                        if res.get("success"):
+                            x_ok = True
+                            log.info("✅ Twitter — published successfully")
+                        else:
+                            log.warning("⚠️  Twitter — publish returned non-success: %s", res)
+                    except Exception:
+                        log.exception("❌ Twitter — publish failed")
+                else:
+                    log.info("🐦 Twitter not configured — skipping")
+
+                published_to = (
+                    PublishedToEnum.both if patreon_ok and x_ok
+                    else (PublishedToEnum.patreon if patreon_ok
+                          else (PublishedToEnum.x if x_ok else None))
+                )
+
+                if published_to is None:
+                    log.warning("⚠️  Deal id=%s — nothing published, skipping DB write", sid)
+                    continue
+
+                log.info("💾 Saving PublishedDeal — patreon=%s x=%s published_to=%s",
+                         patreon_ok, x_ok, published_to)
+
+                pd = PublishedDeal(
+                    destination=deal.get("destination"),
+                    departure_city=deal.get("departure_city"),
+                    price=deal.get("price"),
+                    median_price=deal.get("median_price"),
+                    discount_pct=deal.get("discount_pct"),
+                    date_from=deal.get("date_from"),
+                    date_to=deal.get("date_to"),
+                    duration_days=deal.get("duration_days"),
+                    published_at=datetime.utcnow(),
+                    published_to=published_to,
+                    post_text_patreon=patreon_body if patreon_ok else None,
+                    post_text_x=text if x_ok else None,
+                    deal_hash=deal.get("_deal_hash"),
+                )
+                db.add(pd)
+                db.commit()
+                log.debug("💾 PublishedDeal #%d saved", pd.id)
+
+                published_summary["patreon"] = published_summary["patreon"] or patreon_ok
+                published_summary["x"] = published_summary["x"] or x_ok
+
+            ingest_log.status = "done"
             db.commit()
-            log.debug("💾 PublishedDeal #%d saved", pd.id)
 
-            published_summary["patreon"] = published_summary["patreon"] or patreon_ok
-            published_summary["x"] = published_summary["x"] or x_ok
+            log.info("━" * 60)
+            log.info("📊 Ingest #%d complete — selected=%d patreon=%s x=%s",
+                     ingest_id, len(selected_ids),
+                     published_summary["patreon"], published_summary["x"])
 
-        ingest_log.status = "done"
-        db.add(ingest_log)
-        db.commit()
-
-        log.info("━" * 60)
-        log.info("📊 Ingest complete — selected=%d patreon=%s x=%s",
-                 len(selected_ids), published_summary["patreon"], published_summary["x"])
-        return {"status": "ok", "selected": len(selected_ids), "published": published_summary}
-
-    except Exception as e:
-        log.exception("💥 Fatal error during ingest pipeline")
-        ingest_log.status = "error"
-        ingest_log.error_message = str(e)
-        db.add(ingest_log)
-        db.commit()
-        return {"status": "ok", "error": str(e), "selected": 0, "published": {"patreon": False, "x": False}}
+        except Exception as e:
+            log.exception("💥 Fatal error during ingest pipeline (#%d)", ingest_id)
+            ingest_log.status = "error"
+            ingest_log.error_message = str(e)
+            db.commit()
+    finally:
+        db.close()
 
 
 @app.get("/history")
