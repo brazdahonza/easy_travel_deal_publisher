@@ -437,14 +437,18 @@ class PatreonPublisher:
                 # Wait for composer mount with two passes — second pass scrolls
                 # and waits longer in case lazy-mount missed first paint.
                 composer_ready = False
+                composer_mount_selector = (
+                    'textarea[placeholder="Title"], input[placeholder="Title"], '
+                    '[aria-label="Title"], [data-tag="post-title-field"], '
+                    'textarea[name="title"], input[name="title"], '
+                    'textarea[class*="titleTextArea"], '
+                    'textarea[aria-multiline="true"][placeholder="Title"], '
+                    '[class*="titleTextAreaWrapper"] textarea'
+                )
                 for pass_idx in (1, 2):
                     try:
                         timeout_ms = 25000 if pass_idx == 1 else 35000
-                        await page.locator(
-                            'textarea[placeholder="Title"], input[placeholder="Title"], '
-                            '[aria-label="Title"], [data-tag="post-title-field"], '
-                            'textarea[name="title"], input[name="title"]'
-                        ).first.wait_for(state="visible", timeout=timeout_ms)
+                        await page.locator(composer_mount_selector).first.wait_for(state="visible", timeout=timeout_ms)
                         composer_ready = True
                         log.info("✅ Composer ready (pass %d) — url=%s", pass_idx, page.url)
                         break
@@ -473,6 +477,11 @@ class PatreonPublisher:
                     '[data-tag="post-title"]',
                     '[aria-label="Title"]',
                     '[aria-label="Post title"]',
+                    'textarea[class*="titleTextArea"]',
+                    'textarea[aria-multiline="true"][placeholder="Title"]',
+                    'textarea[aria-multiline="true"][aria-label="Title"]',
+                    '[class*="titleTextAreaWrapper"] textarea',
+                    '[class*="tokensPostPage"] textarea[placeholder="Title"]',
                     'textarea[placeholder*="title" i]',
                     'input[placeholder*="title" i]',
                 ]
