@@ -451,9 +451,11 @@ class PatreonPublisher:
 
                 log.info("✅ Patreon draft prepared — title='%s'", title)
 
-                # Wait for Patreon's autosave to pick up the filled content before leaving
-                log.info("⏳ Waiting 5s for autosave to capture content...")
-                await page.wait_for_timeout(5000)
+                # Wait long enough for Patreon's autosave to flush title, body and
+                # uploaded image before we navigate away. Image upload in particular
+                # finishes async — too short a wait drops the picture from the draft.
+                log.info("⏳ Waiting 25s for autosave to capture title/body/image...")
+                await page.wait_for_timeout(25000)
 
                 # Capture composer/draft URL before navigating away.
                 # Patreon composer URL contains the post id (e.g. /posts/<id>/edit or ?postId=<id>).
