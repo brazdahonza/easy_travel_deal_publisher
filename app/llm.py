@@ -1,6 +1,6 @@
 import logging
 from .config import settings
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -56,3 +56,22 @@ class AnthropicWrapper:
         except Exception as e:
             log.exception("❌ Anthropic API call failed: %s", e)
             raise
+
+    def generate_post(self, deal: Dict, system_prompt: str, max_tokens: int = 1024) -> str:
+        import json
+        if not self._client:
+            raise RuntimeError("Anthropic client unavailable")
+        user_msg = json.dumps({k: v for k, v in deal.items() if not k.startswith("_")}, ensure_ascii=False)
+        log.info("📡 Generating post via Anthropic — destination=%s", deal.get("destination"))
+        resp = self._client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=max_tokens,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        text = resp.content[0].text.strip() if resp.content else ""
+        log.info("✅ Post generated — %d chars", len(text))
+        log.debug("📊 Usage — input=%s output=%s",
+                  getattr(resp.usage, "input_tokens", "?"),
+                  getattr(resp.usage, "output_tokens", "?"))
+        return text

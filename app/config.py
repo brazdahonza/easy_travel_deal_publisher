@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: Optional[str] = None
     NEARBY_COUNTRIES: Optional[str] = None
     CREATOR_EDITOR_URL: str = "https://www.patreon.com/creator/posts/new"
+    PATREON_DRY_RUN: bool = False
 
 
 settings = Settings()

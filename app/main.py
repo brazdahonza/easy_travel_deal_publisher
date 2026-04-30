@@ -110,7 +110,7 @@ async def ingest(payload: IngestPayload, db: Any = Depends(get_db), x_api_key: O
             db.commit()
             return {"status": "ok", "error": selection.get("error"), "selected": 0, "published": {"patreon": False, "x": False}}
 
-        selected_ids = selection.get("selected", [])
+        selected_ids = selection.get("selected", [])[:2]
         log.info("🎯 LLM selected %d deal(s): %s", len(selected_ids), selected_ids)
         if selection.get("justification"):
             log.info("💬 LLM justification: %s", selection["justification"])

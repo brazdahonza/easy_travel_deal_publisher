@@ -5,10 +5,11 @@ from app.publishers.twitter import TwitterPublisher
 
 def test_patreon_missing_session():
     p = PatreonPublisher()
+    p.session = None  # force no session regardless of env
     with pytest.raises(SessionExpiredError):
         import asyncio
 
-        asyncio.get_event_loop().run_until_complete(p.publish("t", "<p>x</p>"))
+        asyncio.run(p.publish("t", "<p>x</p>"))
 
 
 def test_twitter_not_configured():

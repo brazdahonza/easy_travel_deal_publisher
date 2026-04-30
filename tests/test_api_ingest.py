@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture(autouse=True)
 def create_tables():
+    import app.models  # noqa: F401 — registers models with Base.metadata
     Base.metadata.create_all(bind=ENGINE)
     yield
     # no teardown for in-memory sqlite
@@ -23,10 +24,10 @@ def test_ingest_pipeline(monkeypatch):
     def fake_select(deals):
         return {"selected": [deals[0]["id"], deals[1]["id"]], "justification": "ok"}
 
-    monkeypatch.setattr("app.deal_selector.select_with_llm", fake_select)
+    monkeypatch.setattr("app.main.select_with_llm", fake_select)
 
     # mock PatreonPublisher.publish async
-    async def fake_patreon_publish(title, html):
+    async def fake_patreon_publish(self, title, body_text, destination=None):
         return {"success": True, "url": "https://patreon.fake/post/1"}
 
     monkeypatch.setattr("app.publishers.patreon.PatreonPublisher.publish", fake_patreon_publish)
@@ -36,6 +37,10 @@ def test_ingest_pipeline(monkeypatch):
         return {"success": True, "result": {"id": "123"}}
 
     monkeypatch.setattr("app.publishers.twitter.TwitterPublisher.publish", fake_twitter_publish)
+    monkeypatch.setattr("app.main.settings", type("S", (), {
+        "TWITTER_API_KEY": "fake", "TWITTER_ACCESS_TOKEN": "fake",
+        "INGEST_API_KEY": None, "ANTHROPIC_API_KEY": None,
+    })())
 
     payload = {
         "deals": [

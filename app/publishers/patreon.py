@@ -117,12 +117,13 @@ class PatreonPublisher:
                 await page.wait_for_timeout(500)
                 log.debug("✅ Title filled")
 
-                # Step 5: Fill body
+                # Step 5: Fill body (ProseMirror/Remirror — .fill() doesn't dispatch editor events)
                 log.info("✏️  Filling body field (%d chars)...", len(body_text))
                 body_field = page.locator('div[contenteditable="true"][aria-label="Text input field for post content"]')
                 await body_field.wait_for(state="visible", timeout=10000)
                 await body_field.click()
-                await body_field.fill(body_text)
+                await page.keyboard.press("Control+a")
+                await page.keyboard.type(body_text)
                 await page.wait_for_timeout(500)
                 log.debug("✅ Body filled")
 
@@ -151,6 +152,10 @@ class PatreonPublisher:
                         log.info("🖼️  No image available for '%s' — skipping upload", destination)
 
                 log.info("✅ Patreon draft prepared — title='%s'", title)
+
+                # Wait for Patreon's autosave to pick up the filled content before leaving
+                log.info("⏳ Waiting 5s for autosave to capture content...")
+                await page.wait_for_timeout(5000)
 
                 # Navigate away to trigger Patreon's auto-save of the draft
                 log.info("💾 Navigating away to trigger draft save...")

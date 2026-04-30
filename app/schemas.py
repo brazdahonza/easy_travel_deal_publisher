@@ -8,12 +8,12 @@ class DealIn(BaseModel):
     destination: str
     departure_city: str
     price: int
-    median_price: Optional[int]
-    discount_pct: Optional[float]
-    date_from: Optional[date]
-    date_to: Optional[date]
-    duration_days: Optional[int]
-    ticket_url: Optional[HttpUrl]
+    median_price: Optional[int] = None
+    discount_pct: Optional[float] = None
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+    duration_days: Optional[int] = None
+    ticket_url: Optional[HttpUrl] = None
     is_nearby: Optional[bool] = None
     extra: Optional[str] = None
 
