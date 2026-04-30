@@ -128,7 +128,10 @@ class PatreonPublisher:
                 locale="en-US",
             )
             if Stealth is not None:
-                await Stealth().apply_stealth_async(context)
+                await Stealth(
+                    navigator_platform_override="MacIntel",
+                    chrome_runtime=True,
+                ).apply_stealth_async(context)
                 log.debug("🥷 Stealth evasions applied to context")
 
             try:
@@ -149,89 +152,27 @@ class PatreonPublisher:
                 if "login" in page.url or "signup" in page.url:
                     raise SessionExpiredError("Session expired — redirected to login")
 
-                # Step 2+3: Open post composer via Create button → Post option in dropdown.
-                # Direct URL (/posts/create) no longer exists — must drive UI.
-                _create_selectors = [
-                    '[data-tag="create-content-button"]',
-                    'button[aria-label*="Create"]',
-                    'button:has-text("Create")',
-                ]
-                MAX_FLOW_ATTEMPTS = 3
-                composer_ready = False
-                for attempt in range(1, MAX_FLOW_ATTEMPTS + 1):
-                    log.info("🖱️  Opening composer (attempt %d/%d)...", attempt, MAX_FLOW_ATTEMPTS)
+                # Step 2: Navigate directly to post composer
+                log.info("📝 Navigating to post composer...")
+                await page.goto("https://www.patreon.com/posts/new", wait_until="domcontentloaded", timeout=60000)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    log.debug("⚠️  networkidle not reached within 15s — proceeding")
+                await page.wait_for_timeout(2000)
 
-                    # Click Create
-                    create_clicked = False
-                    for sel in _create_selectors:
-                        try:
-                            btn = page.locator(sel).first
-                            await btn.wait_for(state="visible", timeout=5000)
-                            await btn.click()
-                            await page.wait_for_timeout(1000)
-                            log.debug("✅ Create clicked via: %s", sel)
-                            create_clicked = True
-                            break
-                        except Exception:
-                            log.debug("⚠️  Create selector miss: %s", sel)
+                if "login" in page.url or "signup" in page.url:
+                    await self._dump_diagnostics(page, "composer_redirected_login")
+                    raise SessionExpiredError("Session expired — redirected to login")
 
-                    if not create_clicked:
-                        log.warning("⚠️  Create button not found — reloading home and retrying")
-                        await page.goto("https://www.patreon.com/home", wait_until="domcontentloaded", timeout=60000)
-                        await page.wait_for_timeout(3000)
-                        continue
+                log.debug("📝 Composer URL — %s", page.url)
 
-                    # Click Post option in dropdown
-                    post_selectors = [
-                        'a:has([data-tag="IconPosts"])',
-                        'button:has([data-tag="IconPosts"])',
-                        '[role="menuitem"]:has-text("Post")',
-                        'a:has-text("Post")',
-                    ]
-                    post_clicked = False
-                    for sel in post_selectors:
-                        try:
-                            opt = page.locator(sel).first
-                            await opt.wait_for(state="visible", timeout=5000)
-                            await opt.click()
-                            await page.wait_for_timeout(2000)
-                            log.debug("✅ Post option clicked via: %s — url=%s", sel, page.url)
-                            post_clicked = True
-                            break
-                        except Exception:
-                            log.debug("⚠️  Post option selector miss: %s", sel)
-
-                    if not post_clicked:
-                        log.warning("⚠️  Post option not found in dropdown — restarting flow")
-                        await page.goto("https://www.patreon.com/home", wait_until="domcontentloaded", timeout=60000)
-                        await page.wait_for_timeout(3000)
-                        continue
-
-                    # Wait for composer to settle
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=15000)
-                    except Exception:
-                        log.debug("⚠️  networkidle not reached within 15s — proceeding")
-                    await page.wait_for_timeout(2000)
-
-                    if "login" in page.url or "signup" in page.url:
-                        await self._dump_diagnostics(page, "composer_redirected_login")
-                        raise SessionExpiredError("Session expired during composer flow")
-
-                    # Verify composer mounted by probing for title textarea
-                    try:
-                        await page.locator('textarea[placeholder="Title"], input[placeholder="Title"], [aria-label="Title"]').first.wait_for(state="visible", timeout=8000)
-                        composer_ready = True
-                        log.info("✅ Composer ready — url=%s", page.url)
-                        break
-                    except Exception:
-                        log.warning("⚠️  Composer did not mount title field — restarting flow")
-                        await self._dump_diagnostics(page, f"composer_not_ready_attempt{attempt}")
-                        await page.goto("https://www.patreon.com/home", wait_until="domcontentloaded", timeout=60000)
-                        await page.wait_for_timeout(3000)
-
-                if not composer_ready:
-                    raise RuntimeError(f"Failed to reach Patreon post composer after {MAX_FLOW_ATTEMPTS} attempts")
+                try:
+                    await page.locator('textarea[placeholder="Title"], input[placeholder="Title"], [aria-label="Title"]').first.wait_for(state="visible", timeout=15000)
+                    log.info("✅ Composer ready — url=%s", page.url)
+                except Exception:
+                    await self._dump_diagnostics(page, "composer_not_ready")
+                    raise RuntimeError("Post composer did not mount title field")
 
                 # Step 4: Fill title (multi-selector fallback — Patreon UI changes frequently)
                 log.info("✏️  Filling title field: '%s'", title)
