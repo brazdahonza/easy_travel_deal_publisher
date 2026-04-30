@@ -181,6 +181,11 @@ async def ingest(payload: IngestPayload, db: Any = Depends(get_db), x_api_key: O
                 else (PublishedToEnum.patreon if patreon_ok
                       else (PublishedToEnum.x if x_ok else None))
             )
+
+            if published_to is None:
+                log.warning("⚠️  Deal id=%s — nothing published, skipping DB write", sid)
+                continue
+
             log.info("💾 Saving PublishedDeal — patreon=%s x=%s published_to=%s",
                      patreon_ok, x_ok, published_to)
 

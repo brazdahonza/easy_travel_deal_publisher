@@ -86,7 +86,8 @@ class PatreonPublisher:
                 # Step 1: Navigate home
                 log.info("🏠 Navigating to Patreon home...")
                 await page.goto("https://www.patreon.com/home", wait_until="domcontentloaded", timeout=60000)
-                await page.wait_for_timeout(2000)
+                await page.wait_for_load_state("load", timeout=60000)
+                await page.wait_for_timeout(3000)
                 log.debug("🏠 Patreon home loaded — url=%s", page.url)
 
                 if "login" in page.url or "signup" in page.url:
@@ -95,7 +96,7 @@ class PatreonPublisher:
                 # Step 2: Click Create button
                 log.info("🖱️  Clicking Create button...")
                 create_btn = page.locator('[data-tag="create-content-button"]').first
-                await create_btn.wait_for(state="visible", timeout=10000)
+                await create_btn.wait_for(state="visible", timeout=30000)
                 await create_btn.click()
                 await page.wait_for_timeout(1000)
                 log.debug("✅ Create button clicked")
