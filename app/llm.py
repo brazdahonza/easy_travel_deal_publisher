@@ -77,7 +77,7 @@ class AnthropicWrapper:
         )
         log.info("📡 Generating post via Anthropic — destination=%s", deal.get("destination"))
         resp = self._client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             max_tokens=max_tokens,
             system=system_prompt,
             messages=[{"role": "user", "content": user_msg}],
