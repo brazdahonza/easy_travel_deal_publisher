@@ -19,9 +19,10 @@ app = FastAPI(title="easy_travel_deal_publisher")
 
 @app.on_event("startup")
 def create_tables():
-    from .database import ENGINE, Base
+    from .database import ENGINE, Base, drop_stale_deal_hash_unique
     from . import models  # noqa: F401 — registers table metadata
     if ENGINE is not None:
+        drop_stale_deal_hash_unique(ENGINE)
         Base.metadata.create_all(bind=ENGINE)
         log.info("💾 Database tables ready")
     else:

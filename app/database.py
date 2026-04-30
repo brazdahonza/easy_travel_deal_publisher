@@ -4,7 +4,7 @@ from .config import settings
 log = logging.getLogger(__name__)
 
 try:
-    from sqlalchemy import create_engine
+    from sqlalchemy import create_engine, inspect, text
     from sqlalchemy.orm import sessionmaker, declarative_base
 
     log.debug("💾 Connecting to database...")
@@ -27,6 +27,29 @@ try:
         finally:
             db.close()
             log.debug("💾 DB session closed")
+
+    def drop_stale_deal_hash_unique(engine) -> None:
+        # Drops legacy UNIQUE index/constraint on published_deals.deal_hash.
+        # Why: dedup moved upstream (commit c18cbbb); model no longer marks the
+        # column unique, but create_all never drops existing DB objects, so old
+        # deployments keep enforcing uniqueness and fail re-publish attempts.
+        if engine is None:
+            return
+        insp = inspect(engine)
+        if "published_deals" not in insp.get_table_names():
+            return
+        for uc in insp.get_unique_constraints("published_deals"):
+            if uc.get("column_names") == ["deal_hash"] and uc.get("name"):
+                with engine.begin() as conn:
+                    conn.execute(text(f'ALTER TABLE published_deals DROP CONSTRAINT "{uc["name"]}"'))
+                log.info("💾 Dropped stale unique constraint %s on deal_hash", uc["name"])
+        for idx in insp.get_indexes("published_deals"):
+            if idx.get("column_names") == ["deal_hash"] and idx.get("unique") and idx.get("name"):
+                name = idx["name"]
+                with engine.begin() as conn:
+                    conn.execute(text(f'DROP INDEX IF EXISTS "{name}"'))
+                    conn.execute(text(f'CREATE INDEX "{name}" ON published_deals (deal_hash)'))
+                log.info("💾 Replaced stale unique index %s with non-unique on deal_hash", name)
 
 except Exception:
     log.exception("❌ Failed to initialize database engine")
