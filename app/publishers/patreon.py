@@ -10,6 +10,48 @@ import pathlib
 log = logging.getLogger(__name__)
 
 
+# Rotating browser profiles. Each entry is internally consistent — UA matches
+# Sec-CH-UA brand list and platform header, viewport range matches OS.
+_BROWSER_PROFILES = [
+    {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "platform": '"macOS"',
+        "viewports": [(1440, 900), (1512, 982), (1680, 1050), (1728, 1117)],
+        "scale": 2,
+        "webgl_vendor": "Apple Inc.",
+        "webgl_renderer": "Apple M1",
+    },
+    {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Google Chrome";v="130", "Chromium";v="130", "Not_A Brand";v="24"',
+        "platform": '"macOS"',
+        "viewports": [(1440, 900), (1536, 960), (1680, 1050)],
+        "scale": 2,
+        "webgl_vendor": "Apple Inc.",
+        "webgl_renderer": "Apple M2",
+    },
+    {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "platform": '"Windows"',
+        "viewports": [(1366, 768), (1536, 864), (1600, 900), (1920, 1080)],
+        "scale": 1,
+        "webgl_vendor": "Google Inc. (NVIDIA)",
+        "webgl_renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    },
+    {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Google Chrome";v="130", "Chromium";v="130", "Not_A Brand";v="24"',
+        "platform": '"Windows"',
+        "viewports": [(1366, 768), (1920, 1080)],
+        "scale": 1,
+        "webgl_vendor": "Google Inc. (Intel)",
+        "webgl_renderer": "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+    },
+]
+
+
 _STEALTH_INIT_SCRIPT = r"""
 // Hide webdriver
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -53,18 +95,20 @@ if (origQuery) {
             : origQuery(parameters);
 }
 
-// WebGL vendor/renderer spoof — Apple/Apple GPU is plausible for Mac UA
+// WebGL vendor/renderer spoof — values injected per-profile via __WEBGL_VENDOR/__WEBGL_RENDERER
+const __vendor = window.__WEBGL_VENDOR__ || 'Apple Inc.';
+const __renderer = window.__WEBGL_RENDERER__ || 'Apple M1';
 const getParameter = WebGLRenderingContext.prototype.getParameter;
 WebGLRenderingContext.prototype.getParameter = function(p) {
-    if (p === 37445) return 'Apple Inc.';
-    if (p === 37446) return 'Apple M1';
+    if (p === 37445) return __vendor;
+    if (p === 37446) return __renderer;
     return getParameter.apply(this, [p]);
 };
 if (window.WebGL2RenderingContext) {
     const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
     WebGL2RenderingContext.prototype.getParameter = function(p) {
-        if (p === 37445) return 'Apple Inc.';
-        if (p === 37446) return 'Apple M1';
+        if (p === 37445) return __vendor;
+        if (p === 37446) return __renderer;
         return getParameter2.apply(this, [p]);
     };
 }
@@ -255,57 +299,78 @@ class PatreonPublisher:
         async with async_playwright() as p:
             headless = settings.PATREON_HEADLESS
             slow_mo = settings.PATREON_SLOWMO_MS
-            log.debug("🌐 Launching Chromium browser (headless=%s, slow_mo=%dms, stealth=%s)", headless, slow_mo, Stealth is not None)
-            browser = await p.chromium.launch(
-                headless=headless,
-                slow_mo=slow_mo,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-features=IsolateOrigins,site-per-process,AutomationControlled",
-                    "--disable-site-isolation-trials",
-                    "--disable-dev-shm-usage",
-                    "--no-sandbox",
-                    "--disable-infobars",
-                    "--disable-popup-blocking",
-                    "--disable-default-apps",
-                    "--disable-extensions-except",
-                    "--disable-translate",
-                    "--metrics-recording-only",
-                    "--no-first-run",
-                    "--password-store=basic",
-                    "--use-mock-keychain",
-                    "--lang=en-US,en",
-                ],
+
+            profile = random.choice(_BROWSER_PROFILES)
+            vw, vh = random.choice(profile["viewports"])
+            launch_args = [
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process,AutomationControlled",
+                "--disable-site-isolation-trials",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-infobars",
+                "--disable-popup-blocking",
+                "--disable-default-apps",
+                "--disable-extensions-except",
+                "--disable-translate",
+                "--metrics-recording-only",
+                "--no-first-run",
+                "--password-store=basic",
+                "--use-mock-keychain",
+                "--lang=en-US,en",
+            ]
+
+            log.debug(
+                "🌐 Launching browser — profile=%s viewport=%dx%d headless=%s slow_mo=%dms",
+                profile["platform"], vw, vh, headless, slow_mo,
             )
-            # Randomize viewport within plausible mac ranges → fingerprint variance
-            vw = random.choice([1440, 1512, 1536, 1680, 1728])
-            vh = random.choice([900, 864, 982, 1050, 1117])
+
+            # Prefer real Chrome (channel='chrome') when installed — harder to
+            # fingerprint than bundled Chromium. Fall back gracefully.
+            browser = None
+            for channel in ("chrome", None):
+                try:
+                    kwargs = {"headless": headless, "slow_mo": slow_mo, "args": launch_args}
+                    if channel:
+                        kwargs["channel"] = channel
+                    browser = await p.chromium.launch(**kwargs)
+                    log.debug("🌐 Launched with channel=%s", channel or "chromium")
+                    break
+                except Exception as exc:
+                    log.debug("⚠️  Launch with channel=%s failed: %s", channel or "chromium", exc)
+            if browser is None:
+                raise RuntimeError("Could not launch any Chromium-based browser")
+
             context = await browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
+                user_agent=profile["ua"],
                 viewport={"width": vw, "height": vh},
                 screen={"width": vw, "height": vh},
                 locale="en-US",
                 timezone_id="Europe/Prague",
                 permissions=["clipboard-read", "clipboard-write"],
                 color_scheme="light",
-                device_scale_factor=2,
+                device_scale_factor=profile["scale"],
                 is_mobile=False,
                 has_touch=False,
                 java_script_enabled=True,
                 extra_http_headers={
                     "Accept-Language": "en-US,en;q=0.9,cs;q=0.8",
-                    "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                    "Sec-Ch-Ua": profile["sec_ch_ua"],
                     "Sec-Ch-Ua-Mobile": "?0",
-                    "Sec-Ch-Ua-Platform": '"macOS"',
+                    "Sec-Ch-Ua-Platform": profile["platform"],
                     "Upgrade-Insecure-Requests": "1",
                 },
             )
+            # Inject WebGL spoof values matching this profile, then run main stealth.
+            await context.add_init_script(
+                f"window.__WEBGL_VENDOR__ = {json.dumps(profile['webgl_vendor'])};"
+                f"window.__WEBGL_RENDERER__ = {json.dumps(profile['webgl_renderer'])};"
+            )
             await context.add_init_script(_STEALTH_INIT_SCRIPT)
-            log.debug("🥷 Custom stealth init script injected (viewport=%dx%d)", vw, vh)
+            log.debug(
+                "🥷 Stealth injected — UA=%s WebGL=%s/%s",
+                profile["ua"][:60], profile["webgl_vendor"], profile["webgl_renderer"],
+            )
             if Stealth is not None:
                 await Stealth(
                     navigator_platform_override="MacIntel",
@@ -320,6 +385,23 @@ class PatreonPublisher:
                     log.debug("🍪 Injected %d session cookies", len(cookies))
 
                 page = await context.new_page()
+
+                # Step 0: Warm up on patreon.com root before any authenticated nav.
+                # A real user typically lands here first; jumping straight to /home
+                # with cookies pre-injected is a weak bot signal.
+                log.info("🌍 Warming up on patreon.com root...")
+                try:
+                    await page.goto("https://www.patreon.com/", wait_until="domcontentloaded", timeout=60000)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass
+                    await page.wait_for_timeout(random.randint(2500, 5000))
+                    await self._dismiss_cookie_banner(page)
+                    await self._human_jitter(page)
+                    log.debug("🌍 Root warmup done — url=%s", page.url)
+                except Exception as e:
+                    log.debug("⚠️  Root warmup failed (non-fatal): %s", e)
 
                 # Step 1: Navigate home
                 log.info("🏠 Navigating to Patreon home...")
