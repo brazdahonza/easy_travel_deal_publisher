@@ -59,9 +59,20 @@ class AnthropicWrapper:
 
     def generate_post(self, deal: Dict, system_prompt: str, max_tokens: int = 1024) -> str:
         import json
+        import datetime
         if not self._client:
             raise RuntimeError("Anthropic client unavailable")
-        user_msg = json.dumps({k: v for k, v in deal.items() if not k.startswith("_")}, ensure_ascii=False)
+
+        def _default(obj):
+            if isinstance(obj, (datetime.date, datetime.datetime)):
+                return obj.isoformat()
+            raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+        user_msg = json.dumps(
+            {k: v for k, v in deal.items() if not k.startswith("_")},
+            ensure_ascii=False,
+            default=_default,
+        )
         log.info("📡 Generating post via Anthropic — destination=%s", deal.get("destination"))
         resp = self._client.messages.create(
             model="claude-haiku-4-5-20251001",

@@ -93,21 +93,43 @@ class PatreonPublisher:
                 if "login" in page.url or "signup" in page.url:
                     raise SessionExpiredError("Session expired — redirected to login")
 
-                # Step 2: Click Create button
-                log.info("🖱️  Clicking Create button...")
-                create_btn = page.locator('[data-tag="create-content-button"]').first
-                await create_btn.wait_for(state="visible", timeout=30000)
-                await create_btn.click()
-                await page.wait_for_timeout(1000)
-                log.debug("✅ Create button clicked")
+                # Step 2: Navigate to post creation (try button first, fall back to direct URL)
+                log.info("🖱️  Navigating to post creation...")
+                _create_selectors = [
+                    '[data-tag="create-content-button"]',
+                    'button[aria-label*="Create"]',
+                    'a[href*="posts/create"]',
+                    'button:has-text("Create")',
+                ]
+                _clicked = False
+                for sel in _create_selectors:
+                    try:
+                        btn = page.locator(sel).first
+                        await btn.wait_for(state="visible", timeout=5000)
+                        await btn.click()
+                        await page.wait_for_timeout(1000)
+                        log.debug("✅ Create button clicked via selector: %s", sel)
+                        _clicked = True
+                        break
+                    except Exception:
+                        log.debug("⚠️  Selector not found: %s", sel)
 
-                # Step 3: Select Post from dropdown
-                log.info("🖱️  Selecting Post option from dropdown...")
-                post_option = page.locator('a:has([data-tag="IconPosts"])')
-                await post_option.wait_for(state="visible", timeout=5000)
-                await post_option.click()
-                await page.wait_for_timeout(2000)
-                log.debug("✅ Post option selected — url=%s", page.url)
+                if _clicked:
+                    # Step 3: Select Post from dropdown (only if button opened a menu)
+                    log.info("🖱️  Selecting Post option from dropdown...")
+                    try:
+                        post_option = page.locator('a:has([data-tag="IconPosts"])')
+                        await post_option.wait_for(state="visible", timeout=5000)
+                        await post_option.click()
+                        await page.wait_for_timeout(2000)
+                        log.debug("✅ Post option selected — url=%s", page.url)
+                    except Exception:
+                        log.debug("⚠️  Dropdown post option not found — may have navigated directly")
+                else:
+                    log.info("🔗 Falling back to direct post creation URL")
+                    await page.goto("https://www.patreon.com/posts/create", wait_until="domcontentloaded", timeout=30000)
+                    await page.wait_for_timeout(3000)
+                    log.debug("✅ Navigated to post creation — url=%s", page.url)
 
                 # Step 4: Fill title
                 log.info("✏️  Filling title field: '%s'", title)
