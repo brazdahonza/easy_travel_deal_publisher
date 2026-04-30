@@ -5,7 +5,7 @@ from .config import settings
 from .schemas import IngestPayload, PatreonSessionPayload
 from .database import get_db
 from typing import Any
-from .deal_selector import filter_duplicates, select_with_llm
+from .deal_selector import filter_duplicates, select_with_llm, deal_hash, duration_bucket
 from .post_generator import generate_patreon_post, generate_twitter_post
 from .publishers import PatreonPublisher, TwitterPublisher, SessionExpiredError
 from .utils import notify_telegram
@@ -84,37 +84,49 @@ async def ingest(payload: IngestPayload, db: Any = Depends(get_db), x_api_key: O
     log.debug("💾 IngestLog #%d created", ingest_log.id)
 
     try:
-        # ── Deduplication ──────────────────────────────────────────
-        log.info("🔍 Running deduplication...")
-        deduped = filter_duplicates(db, [d.dict() for d in payload.deals])
-        filtered_count = len(payload.deals) - len(deduped)
-        log.info("🧹 Dedup done — %d filtered, %d remain", filtered_count, len(deduped))
+        if len(payload.deals) == 1:
+            # ── Single-deal fast path ──────────────────────────────────
+            log.info("📌 Single-deal batch — skipping deduplication and LLM selection")
+            deal_dicts = [d.dict() for d in payload.deals]
+            for d in deal_dicts:
+                bucket = duration_bucket(d.get("duration_days") or 0)
+                d["_deal_hash"] = deal_hash(d.get("destination", ""), d.get("departure_city", ""), bucket)
+                d["_duration_bucket"] = bucket
+            deduped = deal_dicts
+            selected_ids = [deduped[0]["id"]]
+            ingest_log.selected_count = 1
+        else:
+            # ── Deduplication ─────────────────────────────────────────
+            log.info("🔍 Running deduplication...")
+            deduped = filter_duplicates(db, [d.dict() for d in payload.deals])
+            filtered_count = len(payload.deals) - len(deduped)
+            log.info("🧹 Dedup done — %d filtered, %d remain", filtered_count, len(deduped))
 
-        if not deduped:
-            log.info("✋ All deals already published recently — nothing to do")
-            ingest_log.status = "no_new_deals"
-            ingest_log.selected_count = 0
-            db.add(ingest_log)
-            db.commit()
-            return {"status": "ok", "selected": 0, "published": {"patreon": False, "x": False}}
+            if not deduped:
+                log.info("✋ All deals already published recently — nothing to do")
+                ingest_log.status = "no_new_deals"
+                ingest_log.selected_count = 0
+                db.add(ingest_log)
+                db.commit()
+                return {"status": "ok", "selected": 0, "published": {"patreon": False, "x": False}}
 
-        # ── LLM selection ──────────────────────────────────────────
-        log.info("🤖 Sending %d deals to LLM for selection...", len(deduped))
-        selection = select_with_llm(deduped)
+            # ── LLM selection ─────────────────────────────────────────
+            log.info("🤖 Sending %d deals to LLM for selection...", len(deduped))
+            selection = select_with_llm(deduped)
 
-        if selection.get("error"):
-            log.error("❌ LLM selection failed: %s", selection["error"])
-            ingest_log.status = "llm_error"
-            ingest_log.error_message = selection.get("error")
-            db.add(ingest_log)
-            db.commit()
-            return {"status": "ok", "error": selection.get("error"), "selected": 0, "published": {"patreon": False, "x": False}}
+            if selection.get("error"):
+                log.error("❌ LLM selection failed: %s", selection["error"])
+                ingest_log.status = "llm_error"
+                ingest_log.error_message = selection.get("error")
+                db.add(ingest_log)
+                db.commit()
+                return {"status": "ok", "error": selection.get("error"), "selected": 0, "published": {"patreon": False, "x": False}}
 
-        selected_ids = selection.get("selected", [])[:2]
-        log.info("🎯 LLM selected %d deal(s): %s", len(selected_ids), selected_ids)
-        if selection.get("justification"):
-            log.info("💬 LLM justification: %s", selection["justification"])
-        ingest_log.selected_count = len(selected_ids)
+            selected_ids = selection.get("selected", [])[:2]
+            log.info("🎯 LLM selected %d deal(s): %s", len(selected_ids), selected_ids)
+            if selection.get("justification"):
+                log.info("💬 LLM justification: %s", selection["justification"])
+            ingest_log.selected_count = len(selected_ids)
 
         patreon_pub = PatreonPublisher()
         twitter_pub = TwitterPublisher()
