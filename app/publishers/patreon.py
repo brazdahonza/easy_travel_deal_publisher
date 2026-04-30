@@ -577,7 +577,18 @@ class PatreonPublisher:
                 return result
 
             except Exception:
-                log.exception("💥 Patreon publish failed during browser automation")
+                # Surface the page URL prominently so the operator can jump
+                # straight to where the automation got stuck.
+                fail_url = "<unknown>"
+                fail_title = "<unknown>"
+                try:
+                    fail_url = page.url
+                    fail_title = await page.title()
+                except Exception:
+                    pass
+                log.error("🛑 PATREON FAIL URL: %s", fail_url)
+                log.error("🛑 PATREON FAIL PAGE TITLE: %s", fail_title)
+                log.exception("💥 Patreon publish failed during browser automation — url=%s title=%s", fail_url, fail_title)
                 raise
             finally:
                 await context.close()
