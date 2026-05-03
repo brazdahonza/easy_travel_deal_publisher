@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`easy_travel_deal_publisher` is a passive FastAPI microservice for the flynow.cz ecosystem. It receives deal batches from the upstream tracker, deduplicates recent items, asks Claude to choose the best deals, generates Czech social post text, and publishes to Patreon and X/Twitter.
+`easy_travel_deal_publisher` is a passive FastAPI microservice for the flynow.cz ecosystem. It receives pre-rendered post payloads (`title`, `body`, `destination_name`) from upstream and prepares Patreon drafts via Playwright. No LLM calls, no deal selection — those run upstream. Each post is matched to a destination image from `assets/patreon/`.
 
 ## Local run
 
@@ -32,23 +32,17 @@ The tests mock external services. SQLite in-memory is used for DB-oriented tests
 
 For a comprehensive testing guide including manual endpoint testing, local development setup, and Docker testing, see [TESTING.md](TESTING.md).
 
-## Patreon session renewal
+## Patreon session lifecycle
 
-The Patreon publisher uses `PATREON_SESSION`, a base64-encoded JSON session blob.
+Session cookies live in the `patreon_sessions` table (single-row, latest wins). On startup, if the table is empty and `PATREON_SESSION` env is set, the blob is decoded once and seeded into the DB; afterwards the env var is ignored.
 
-To renew the session:
+When `PatreonPublisher.publish()` runs:
 
-1. Set `PATREON_EMAIL` and `PATREON_PASSWORD`.
-2. Run the session helper:
+1. It probes `/api/current_user` with the stored cookies. If 200 with a user id, it skips straight to the composer.
+2. If invalid, it runs the in-process login flow (same Playwright context, same fingerprint) using `PATREON_EMAIL` / `PATREON_PASSWORD` and resolves 2FA via `PATREON_TOTP_SECRET` (preferred) or a one-shot `PATREON_2FA_CODE`.
+3. After publish, refreshed cookies are written back to the database.
 
-```bash
-python -m app.session.setup_session
-```
-
-3. Complete login and 2FA if prompted.
-4. Copy the printed base64 session into `PATREON_SESSION`.
-
-If the stored session expires, the service raises `SessionExpiredError` and can send a Telegram notification when `TELEGRAM_BOT_TOKEN` is configured.
+If login itself fails, the service raises `SessionExpiredError` and sends a Telegram notification when `TELEGRAM_BOT_TOKEN` is configured.
 
 ## Assets and Images
 
@@ -66,7 +60,7 @@ See [assets/README.md](assets/README.md) for image guidelines, sizing, and usage
 2. Expose a small publisher class/function with a single publish method.
 3. Mock it in tests; keep all network calls isolated behind one wrapper.
 4. Update the ingest pipeline in `app/main.py` so each publisher runs independently and partial failures do not block the others.
-5. Persist generated post text and publication status in `published_deals`.
+5. Persist post metadata in `published_deals`.
 
 ## Operational notes
 

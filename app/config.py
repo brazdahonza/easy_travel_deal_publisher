@@ -7,18 +7,18 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "sqlite:///./test.db"
     INGEST_API_KEY: Optional[str] = None
-    ANTHROPIC_API_KEY: Optional[str] = None
     PATREON_EMAIL: Optional[str] = None
     PATREON_PASSWORD: Optional[str] = None
+    # Bootstrap value: copied into the DB session_store on first startup, then
+    # ignored. Live cookies live in the patreon_sessions table.
     PATREON_SESSION: Optional[str] = None
-    TWITTER_API_KEY: Optional[str] = None
-    TWITTER_API_SECRET: Optional[str] = None
-    TWITTER_ACCESS_TOKEN: Optional[str] = None
-    TWITTER_ACCESS_SECRET: Optional[str] = None
+    # TOTP base32 secret from authenticator-app 2FA setup. If set, codes are
+    # generated automatically on every login — best for fully autonomous use.
+    PATREON_TOTP_SECRET: Optional[str] = None
+    # One-shot 2FA code (e.g. SMS/email OTP). Used once, then ignored.
+    PATREON_2FA_CODE: Optional[str] = None
     TELEGRAM_BOT_TOKEN: Optional[str] = None
     TELEGRAM_CHAT_ID: Optional[str] = None
-    NEARBY_COUNTRIES: Optional[str] = None
-    CREATOR_EDITOR_URL: str = "https://www.patreon.com/creator/posts/new"
     PATREON_DRY_RUN: bool = False
     PATREON_HEADLESS: bool = True
     PATREON_SLOWMO_MS: int = 0

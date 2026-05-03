@@ -1,62 +1,73 @@
-import logging
-import re
-import random
-import unicodedata
-from ..config import settings
+import asyncio
 import base64
 import json
+import logging
 import pathlib
+import random
+import re
+import unicodedata
+
+from ..config import settings
+from .. import session_store
+from . import patreon_login
 
 log = logging.getLogger(__name__)
 
 
 # Rotating browser profiles. Each entry is internally consistent — UA matches
-# Sec-CH-UA brand list and platform header, viewport range matches OS.
+# Sec-CH-UA brand list, navigator.platform and hardwareConcurrency match the OS.
 _BROWSER_PROFILES = [
     {
         "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "sec_ch_ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
         "platform": '"macOS"',
+        "navigator_platform": "MacIntel",
         "viewports": [(1440, 900), (1512, 982), (1680, 1050), (1728, 1117)],
         "scale": 2,
         "webgl_vendor": "Apple Inc.",
         "webgl_renderer": "Apple M1",
+        "hw_concurrency": 8,
     },
     {
         "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
         "sec_ch_ua": '"Google Chrome";v="130", "Chromium";v="130", "Not_A Brand";v="24"',
         "platform": '"macOS"',
+        "navigator_platform": "MacIntel",
         "viewports": [(1440, 900), (1536, 960), (1680, 1050)],
         "scale": 2,
         "webgl_vendor": "Apple Inc.",
         "webgl_renderer": "Apple M2",
+        "hw_concurrency": 8,
     },
     {
         "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         "sec_ch_ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
         "platform": '"Windows"',
+        "navigator_platform": "Win32",
         "viewports": [(1366, 768), (1536, 864), (1600, 900), (1920, 1080)],
         "scale": 1,
         "webgl_vendor": "Google Inc. (NVIDIA)",
         "webgl_renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        "hw_concurrency": 12,
     },
     {
         "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
         "sec_ch_ua": '"Google Chrome";v="130", "Chromium";v="130", "Not_A Brand";v="24"',
         "platform": '"Windows"',
+        "navigator_platform": "Win32",
         "viewports": [(1366, 768), (1920, 1080)],
         "scale": 1,
         "webgl_vendor": "Google Inc. (Intel)",
         "webgl_renderer": "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        "hw_concurrency": 8,
     },
 ]
 
 
+# Note: navigator.webdriver is removed by --disable-blink-features=AutomationControlled.
+# Re-defining it via Object.defineProperty (as some stealth scripts do) is itself
+# detectable, so we no longer touch it here.
 _STEALTH_INIT_SCRIPT = r"""
-// Hide webdriver
-Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-
-// Spoof plugins (non-empty array, length 3+)
 Object.defineProperty(navigator, 'plugins', {
     get: () => {
         const arr = [
@@ -72,21 +83,18 @@ Object.defineProperty(navigator, 'plugins', {
     },
 });
 
-// Spoof languages
-Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+Object.defineProperty(navigator, 'languages', { get: () => ['cs-CZ', 'cs', 'en'] });
 
-// Hardware concurrency + memory (typical mac values)
-try { Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 }); } catch(e) {}
+const __hw = window.__HW_CONCURRENCY__ || 8;
+try { Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => __hw }); } catch(e) {}
 try { Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 }); } catch(e) {}
 
-// chrome runtime stub
 window.chrome = window.chrome || {};
 window.chrome.runtime = window.chrome.runtime || {};
 window.chrome.app = window.chrome.app || { isInstalled: false };
 window.chrome.csi = window.chrome.csi || function() { return {}; };
 window.chrome.loadTimes = window.chrome.loadTimes || function() { return {}; };
 
-// Permissions.query — return 'prompt' for notifications instead of 'denied' (headless tell)
 const origQuery = window.navigator.permissions && window.navigator.permissions.query;
 if (origQuery) {
     window.navigator.permissions.query = (parameters) =>
@@ -95,7 +103,6 @@ if (origQuery) {
             : origQuery(parameters);
 }
 
-// WebGL vendor/renderer spoof — values injected per-profile via __WEBGL_VENDOR/__WEBGL_RENDERER
 const __vendor = window.__WEBGL_VENDOR__ || 'Apple Inc.';
 const __renderer = window.__WEBGL_RENDERER__ || 'Apple M1';
 const getParameter = WebGLRenderingContext.prototype.getParameter;
@@ -113,7 +120,6 @@ if (window.WebGL2RenderingContext) {
     };
 }
 
-// Canvas fingerprint: add tiny noise to toDataURL output
 const toDataURL = HTMLCanvasElement.prototype.toDataURL;
 HTMLCanvasElement.prototype.toDataURL = function(...args) {
     const ctx = this.getContext('2d');
@@ -133,7 +139,6 @@ HTMLCanvasElement.prototype.toDataURL = function(...args) {
     return toDataURL.apply(this, args);
 };
 
-// AudioContext fingerprint noise
 try {
     const orig = AudioBuffer.prototype.getChannelData;
     AudioBuffer.prototype.getChannelData = function(...a) {
@@ -145,7 +150,6 @@ try {
     };
 } catch (e) {}
 
-// outerWidth/Height === innerWidth/Height is a headless tell
 try {
     if (window.outerWidth === 0) {
         Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth });
@@ -155,45 +159,42 @@ try {
 """
 
 
+_CF_TITLE_MARKERS = ("just a moment", "attention required", "cloudflare")
+
+
 class SessionExpiredError(Exception):
+    pass
+
+
+class CloudflareChallengeError(Exception):
+    """Page is stuck on a Cloudflare interstitial — session likely needs renewal."""
     pass
 
 
 class PatreonPublisher:
     def __init__(self):
-        self.session = None
-        if settings.PATREON_SESSION:
-            try:
-                data = base64.b64decode(settings.PATREON_SESSION)
-                self.session = json.loads(data)
-                cookie_count = len(self.session.get("cookies", []))
-                timestamp = self.session.get("timestamp", "unknown")
-                log.info("🔐 Patreon session loaded — %d cookies, stored at %s", cookie_count, timestamp)
-            except Exception:
-                log.exception("❌ Failed to decode PATREON_SESSION")
-        else:
-            log.warning("⚠️  PATREON_SESSION not set — Patreon publishing disabled")
+        self.session = session_store.load()
+        if self.session is None:
+            log.warning("⚠️  No stored Patreon session — login flow will run on first publish")
 
     @staticmethod
     def _normalize(text: str) -> str:
         nfkd = unicodedata.normalize("NFKD", text)
         return "".join(c for c in nfkd if not unicodedata.combining(c)).lower().strip()
 
-    def _get_image_path(self, destination: str) -> str:
+    def _get_image_path(self, destination: str) -> str | None:
         app_dir = pathlib.Path(__file__).parent.parent.parent
         patreon_dir = app_dir / "assets" / "patreon"
         dest_norm = self._normalize(destination)
 
         candidates = list(patreon_dir.glob("*.png"))
 
-        # Exact match against any " - "-separated variant in filename
         for img_path in candidates:
             variants = [v.strip() for v in img_path.stem.split(" - ")]
             if any(self._normalize(v) == dest_norm for v in variants):
                 log.info("🖼️  Image found for destination '%s': %s", destination, img_path)
                 return str(img_path)
 
-        # Partial match: destination contained in any variant or vice-versa
         for img_path in candidates:
             variants = [v.strip() for v in img_path.stem.split(" - ")]
             if any(dest_norm in self._normalize(v) or self._normalize(v) in dest_norm for v in variants):
@@ -205,8 +206,6 @@ class PatreonPublisher:
 
     @staticmethod
     async def _find_first_visible(page, selectors: list, timeout_ms: int = 10000):
-        """Try multiple selectors, return first that becomes visible. Raise TimeoutError if none."""
-        import asyncio
         per_try = max(1500, timeout_ms // max(1, len(selectors)))
         last_err = None
         for sel in selectors:
@@ -222,7 +221,6 @@ class PatreonPublisher:
 
     @staticmethod
     async def _human_jitter(page):
-        """Perform small mouse + scroll movements to mimic human idle behavior."""
         try:
             for _ in range(random.randint(2, 4)):
                 x = random.randint(50, 1200)
@@ -239,7 +237,6 @@ class PatreonPublisher:
 
     @staticmethod
     async def _dismiss_cookie_banner(page):
-        """Click 'Accept'/'Allow all' cookie banner if present. Best-effort, never raises."""
         candidates = [
             'button:has-text("Accept all")',
             'button:has-text("Accept All")',
@@ -262,7 +259,6 @@ class PatreonPublisher:
                 continue
 
     async def _dump_diagnostics(self, page, tag: str):
-        """Save screenshot + HTML for post-mortem when selectors fail."""
         try:
             out_dir = pathlib.Path("/tmp/patreon_debug")
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -277,11 +273,45 @@ class PatreonPublisher:
         except Exception as e:
             log.warning("⚠️  Failed to dump diagnostics: %s", e)
 
-    async def publish(self, title: str, body_text: str, destination: str = None) -> dict:
-        if not self.session:
-            log.error("❌ Cannot publish — Patreon session missing or invalid")
-            raise SessionExpiredError("Missing or invalid Patreon session")
+    async def _check_cloudflare(self, page, tag: str) -> None:
+        """Raise CloudflareChallengeError if the page title carries CF markers."""
+        try:
+            title = (await page.title()) or ""
+        except Exception:
+            return
+        if any(m in title.lower() for m in _CF_TITLE_MARKERS):
+            await self._dump_diagnostics(page, f"cf_{tag}")
+            raise CloudflareChallengeError(f"Cloudflare challenge ({tag}) — title={title!r}")
 
+    async def _is_session_valid(self, context) -> bool:
+        """Cheap auth probe via /api/current_user. Avoids a wasted UI round-trip."""
+        try:
+            resp = await context.request.get(
+                "https://www.patreon.com/api/current_user",
+                headers={"Accept": "application/vnd.api+json"},
+                timeout=15000,
+            )
+            if resp.status != 200:
+                log.info("🔐 Session probe — HTTP %s, treating as invalid", resp.status)
+                return False
+            body = await resp.json()
+            ok = bool((body.get("data") or {}).get("id"))
+            log.info("🔐 Session probe — %s", "valid" if ok else "anonymous")
+            return ok
+        except Exception as e:
+            log.debug("⚠️  Session probe error (treating as invalid): %s", e)
+            return False
+
+    async def _persist_cookies(self, context) -> None:
+        try:
+            cookies = await context.cookies()
+            email = (self.session or {}).get("email")
+            session_store.save(cookies, email=email)
+            self.session = {"cookies": cookies, "email": email}
+        except Exception as e:
+            log.debug("⚠️  Failed to persist cookies: %s", e)
+
+    async def publish(self, title: str, body_text: str, destination: str | None = None) -> dict:
         try:
             from playwright.async_api import async_playwright
         except ImportError:
@@ -317,7 +347,7 @@ class PatreonPublisher:
                 "--no-first-run",
                 "--password-store=basic",
                 "--use-mock-keychain",
-                "--lang=en-US,en",
+                "--lang=cs-CZ,cs",
             ]
 
             log.debug(
@@ -325,8 +355,6 @@ class PatreonPublisher:
                 profile["platform"], vw, vh, headless, slow_mo,
             )
 
-            # Prefer real Chrome (channel='chrome') when installed — harder to
-            # fingerprint than bundled Chromium. Fall back gracefully.
             browser = None
             for channel in ("chrome", None):
                 try:
@@ -344,8 +372,9 @@ class PatreonPublisher:
             context = await browser.new_context(
                 user_agent=profile["ua"],
                 viewport={"width": vw, "height": vh},
-                screen={"width": vw, "height": vh},
-                locale="en-US",
+                # Real screens are taller than the viewport because of OS chrome.
+                screen={"width": vw, "height": vh + 85},
+                locale="cs-CZ",
                 timezone_id="Europe/Prague",
                 permissions=["clipboard-read", "clipboard-write"],
                 color_scheme="light",
@@ -354,41 +383,68 @@ class PatreonPublisher:
                 has_touch=False,
                 java_script_enabled=True,
                 extra_http_headers={
-                    "Accept-Language": "en-US,en;q=0.9,cs;q=0.8",
+                    "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.8",
                     "Sec-Ch-Ua": profile["sec_ch_ua"],
                     "Sec-Ch-Ua-Mobile": "?0",
                     "Sec-Ch-Ua-Platform": profile["platform"],
                     "Upgrade-Insecure-Requests": "1",
                 },
             )
-            # Inject WebGL spoof values matching this profile, then run main stealth.
             await context.add_init_script(
                 f"window.__WEBGL_VENDOR__ = {json.dumps(profile['webgl_vendor'])};"
                 f"window.__WEBGL_RENDERER__ = {json.dumps(profile['webgl_renderer'])};"
+                f"window.__HW_CONCURRENCY__ = {profile['hw_concurrency']};"
             )
             await context.add_init_script(_STEALTH_INIT_SCRIPT)
             log.debug(
-                "🥷 Stealth injected — UA=%s WebGL=%s/%s",
+                "🥷 Stealth injected — UA=%s WebGL=%s/%s platform=%s hw=%d",
                 profile["ua"][:60], profile["webgl_vendor"], profile["webgl_renderer"],
+                profile["navigator_platform"], profile["hw_concurrency"],
             )
             if Stealth is not None:
                 await Stealth(
-                    navigator_platform_override="MacIntel",
+                    navigator_platform_override=profile["navigator_platform"],
                     chrome_runtime=True,
                 ).apply_stealth_async(context)
-                log.debug("🥷 playwright-stealth evasions applied")
+                log.debug("🥷 playwright-stealth evasions applied (platform=%s)", profile["navigator_platform"])
 
+            page = None
             try:
-                cookies = self.session.get("cookies", [])
-                if cookies:
-                    await context.add_cookies(cookies)
-                    log.debug("🍪 Injected %d session cookies", len(cookies))
+                if self.session and self.session.get("cookies"):
+                    await context.add_cookies(self.session["cookies"])
+                    log.debug("🍪 Injected %d session cookies", len(self.session["cookies"]))
 
                 page = await context.new_page()
+                # Auto-accept any beforeunload/discard-draft dialog so we can navigate
+                # away cleanly after the autosave wait.
+                page.on("dialog", lambda d: asyncio.create_task(d.accept()))
 
-                # Step 0: Warm up on patreon.com root before any authenticated nav.
-                # A real user typically lands here first; jumping straight to /home
-                # with cookies pre-injected is a weak bot signal.
+                # ── Step 1: validate session ─────────────────────────────
+                session_ok = await self._is_session_valid(context)
+
+                # ── Step 2: login if needed ──────────────────────────────
+                if not session_ok:
+                    if not (settings.PATREON_EMAIL and settings.PATREON_PASSWORD):
+                        raise SessionExpiredError(
+                            "Stored session invalid and no PATREON_EMAIL/PATREON_PASSWORD for login"
+                        )
+                    log.info("🔑 Session invalid — running in-process login")
+                    await patreon_login.login(
+                        page,
+                        email=settings.PATREON_EMAIL,
+                        password=settings.PATREON_PASSWORD,
+                        totp_secret=settings.PATREON_TOTP_SECRET,
+                        one_shot_code=settings.PATREON_2FA_CODE,
+                    )
+                    if not await self._is_session_valid(context):
+                        raise SessionExpiredError("Login completed but session probe still fails")
+                    await self._persist_cookies(context)
+                    self.session = self.session or {}
+                    self.session["email"] = settings.PATREON_EMAIL
+
+                # ── Step 3: open composer + fill ─────────────────────────
+                # Warm up on patreon.com root before authenticated nav. Real
+                # users typically land here first.
                 log.info("🌍 Warming up on patreon.com root...")
                 try:
                     await page.goto("https://www.patreon.com/", wait_until="domcontentloaded", timeout=60000)
@@ -399,25 +455,9 @@ class PatreonPublisher:
                     await page.wait_for_timeout(random.randint(2500, 5000))
                     await self._dismiss_cookie_banner(page)
                     await self._human_jitter(page)
-                    log.debug("🌍 Root warmup done — url=%s", page.url)
                 except Exception as e:
                     log.debug("⚠️  Root warmup failed (non-fatal): %s", e)
 
-                # Step 1: Navigate home
-                log.info("🏠 Navigating to Patreon home...")
-                await page.goto("https://www.patreon.com/home", wait_until="domcontentloaded", timeout=60000)
-                await page.wait_for_load_state("load", timeout=60000)
-                await page.wait_for_timeout(random.randint(2500, 4500))
-                log.debug("🏠 Patreon home loaded — url=%s", page.url)
-
-                if "login" in page.url or "signup" in page.url:
-                    raise SessionExpiredError("Session expired — redirected to login")
-
-                # Human-like jitter: small mouse + scroll motions before next nav
-                await self._human_jitter(page)
-                await self._dismiss_cookie_banner(page)
-
-                # Step 2: Navigate directly to post composer
                 log.info("📝 Navigating to post composer...")
                 await page.goto("https://www.patreon.com/posts/new", wait_until="domcontentloaded", timeout=60000)
                 try:
@@ -430,12 +470,8 @@ class PatreonPublisher:
 
                 if "login" in page.url or "signup" in page.url:
                     await self._dump_diagnostics(page, "composer_redirected_login")
-                    raise SessionExpiredError("Session expired — redirected to login")
+                    raise SessionExpiredError("Composer redirected to login")
 
-                log.debug("📝 Composer URL — %s", page.url)
-
-                # Wait for composer mount with two passes — second pass scrolls
-                # and waits longer in case lazy-mount missed first paint.
                 composer_ready = False
                 composer_mount_selector = (
                     'textarea[placeholder="Title"], input[placeholder="Title"], '
@@ -464,9 +500,10 @@ class PatreonPublisher:
 
                 if not composer_ready:
                     await self._dump_diagnostics(page, "composer_not_ready")
+                    await self._check_cloudflare(page, "composer_mount")
                     raise RuntimeError("Post composer did not mount title field")
 
-                # Step 4: Fill title (multi-selector fallback — Patreon UI changes frequently)
+                # Title
                 log.info("✏️  Filling title field: '%s'", title)
                 title_selectors = [
                     'textarea[placeholder="Title"]',
@@ -489,12 +526,14 @@ class PatreonPublisher:
                     title_field = await self._find_first_visible(page, title_selectors, timeout_ms=20000)
                 except Exception:
                     await self._dump_diagnostics(page, "title_not_found")
+                    await self._check_cloudflare(page, "title_fill")
                     raise
                 await title_field.fill(title)
                 await page.wait_for_timeout(500)
                 log.debug("✅ Title filled")
 
-                # Step 5: Fill body (ProseMirror/Remirror — .fill() doesn't dispatch editor events)
+                # Body — use type() so ProseMirror's input handlers fire naturally.
+                # Clipboard-paste fails silently on headless Linux (no DBus backend).
                 log.info("✏️  Filling body field (%d chars)...", len(body_text))
                 body_selectors = [
                     'div[contenteditable="true"][aria-label="Text input field for post content"]',
@@ -508,48 +547,71 @@ class PatreonPublisher:
                     body_field = await self._find_first_visible(page, body_selectors, timeout_ms=15000)
                 except Exception:
                     await self._dump_diagnostics(page, "body_not_found")
+                    await self._check_cloudflare(page, "body_fill")
                     raise
                 await body_field.click()
-                await page.evaluate("(text) => navigator.clipboard.writeText(text)", body_text)
-                await page.keyboard.press("Control+a")
-                await page.keyboard.press("Control+v")
+                await body_field.type(body_text, delay=8)
                 await page.wait_for_timeout(500)
                 log.debug("✅ Body filled")
 
-                # Step 6: Image upload
+                # Image upload. The composer's hidden file inputs (#photosInput,
+                # #mainMedia, ...) only mount AFTER the user clicks the toolbar
+                # "Image" button — the dropzone div is rendered conditionally.
+                # Grabbing input[type=file] before that opens hits some unrelated
+                # input (avatar, etc.) and never attaches the picture to the post.
+                #
+                # Flow:
+                #   1. Click toolbar button[data-tag=IconPhoto] → dropzone mounts.
+                #   2. set_input_files on #photosInput (image-only). Falls back to
+                #      #mainMedia or finally to clicking Browse + file chooser.
                 if destination:
                     image_path = self._get_image_path(destination)
                     if image_path:
                         log.info("🖼️  Uploading image for '%s'...", destination)
+                        uploaded = False
                         try:
-                            image_btn = page.locator('button:has([data-tag="IconPhoto"])')
-                            await image_btn.wait_for(state="visible", timeout=5000)
+                            image_btn = page.locator('button:has([data-tag="IconPhoto"])').first
+                            await image_btn.wait_for(state="visible", timeout=8000)
                             await image_btn.click()
-                            await page.wait_for_timeout(1000)
+                            log.debug("🖼️  Image toolbar button clicked — waiting for dropzone")
 
-                            browse_btn = page.locator('button:has-text("Browse")').last
-                            await browse_btn.wait_for(state="visible", timeout=5000)
-                            async with page.expect_file_chooser() as fc_info:
-                                await browse_btn.click()
-                            file_chooser = await fc_info.value
-                            await file_chooser.set_files(image_path)
-                            await page.wait_for_timeout(2000)
-                            log.info("✅ Image uploaded successfully")
+                            for sel in ("input#photosInput", "input#mainMedia", "input[type='file']"):
+                                try:
+                                    inp = page.locator(sel).first
+                                    await inp.wait_for(state="attached", timeout=4000)
+                                    await inp.set_input_files(image_path)
+                                    await page.wait_for_timeout(2500)
+                                    uploaded = True
+                                    log.info("✅ Image uploaded via %s", sel)
+                                    break
+                                except Exception as e:
+                                    log.debug("⚠️  %s miss: %s", sel, e)
                         except Exception as e:
-                            log.warning("⚠️  Image upload failed — continuing without image: %s", e)
+                            log.debug("⚠️  Image button / hidden-input path failed: %s", e)
+
+                        if not uploaded:
+                            try:
+                                browse_btn = page.locator('button:has-text("Browse")').last
+                                await browse_btn.wait_for(state="visible", timeout=5000)
+                                async with page.expect_file_chooser() as fc_info:
+                                    await browse_btn.click()
+                                file_chooser = await fc_info.value
+                                await file_chooser.set_files(image_path)
+                                await page.wait_for_timeout(2500)
+                                uploaded = True
+                                log.info("✅ Image uploaded via Browse picker")
+                            except Exception as e:
+                                log.warning("⚠️  Image upload failed — continuing without image: %s", e)
                     else:
                         log.info("🖼️  No image available for '%s' — skipping upload", destination)
 
                 log.info("✅ Patreon draft prepared — title='%s'", title)
 
-                # Wait long enough for Patreon's autosave to flush title, body and
-                # uploaded image before we navigate away. Image upload in particular
-                # finishes async — too short a wait drops the picture from the draft.
+                # Wait for Patreon's autosave to flush title/body/image before
+                # navigating away. Image upload finishes async — short wait drops it.
                 log.info("⏳ Waiting 25s for autosave to capture title/body/image...")
                 await page.wait_for_timeout(25000)
 
-                # Capture composer/draft URL before navigating away.
-                # Patreon composer URL contains the post id (e.g. /posts/<id>/edit or ?postId=<id>).
                 draft_url = page.url
                 post_id = None
                 m = re.search(r"/posts/(\d+)", draft_url) or re.search(r"[?&]postId=(\d+)", draft_url)
@@ -558,34 +620,26 @@ class PatreonPublisher:
                     draft_url = f"https://www.patreon.com/posts/{post_id}/edit"
                 log.info("🔗 Captured draft URL — %s (post_id=%s)", draft_url, post_id or "n/a")
 
-                # Navigate away to trigger Patreon's auto-save of the draft
+                # Trigger server-side draft save by navigating away.
                 log.info("💾 Navigating away to trigger draft save...")
                 await page.goto("https://www.patreon.com", wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(2000)
-                log.info("💾 Draft save triggered — url=%s", page.url)
 
-                # Persist updated cookies
-                try:
-                    updated_cookies = await context.cookies()
-                    self.session["cookies"] = updated_cookies
-                    log.debug("🍪 Session cookies refreshed — %d cookies stored", len(updated_cookies))
-                except Exception as e:
-                    log.debug("⚠️  Failed to refresh session cookies: %s", e)
+                await self._persist_cookies(context)
 
                 result = {"success": True, "url": page.url, "draft_url": draft_url, "post_id": post_id}
-                log.info("🎉 Patreon publish complete — browser will close and restart for next post")
+                log.info("🎉 Patreon publish complete")
                 return result
 
             except Exception:
-                # Surface the page URL prominently so the operator can jump
-                # straight to where the automation got stuck.
                 fail_url = "<unknown>"
                 fail_title = "<unknown>"
-                try:
-                    fail_url = page.url
-                    fail_title = await page.title()
-                except Exception:
-                    pass
+                if page is not None:
+                    try:
+                        fail_url = page.url
+                        fail_title = await page.title()
+                    except Exception:
+                        pass
                 log.error("🛑 PATREON FAIL URL: %s", fail_url)
                 log.error("🛑 PATREON FAIL PAGE TITLE: %s", fail_title)
                 log.exception("💥 Patreon publish failed during browser automation — url=%s title=%s", fail_url, fail_title)
