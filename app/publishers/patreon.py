@@ -1,11 +1,13 @@
-import logging
-import re
-import random
-import unicodedata
-from ..config import settings
-import base64
 import json
+import logging
 import pathlib
+import random
+import re
+import unicodedata
+
+from ..config import settings
+from ..session import state as session_state
+from ..session.setup_session import perform_patreon_login
 
 log = logging.getLogger(__name__)
 
@@ -155,24 +157,25 @@ try {
 """
 
 
-class SessionExpiredError(Exception):
-    pass
+class SessionUnavailableError(Exception):
+    """Raised when no usable Patreon session is available and auto-login fails."""
+
+
+class _SessionExpiredMidFlow(Exception):
+    """Internal: Patreon redirected to login during a publish attempt — trigger relogin + retry."""
 
 
 class PatreonPublisher:
     def __init__(self):
-        self.session = None
-        if settings.PATREON_SESSION:
-            try:
-                data = base64.b64decode(settings.PATREON_SESSION)
-                self.session = json.loads(data)
-                cookie_count = len(self.session.get("cookies", []))
-                timestamp = self.session.get("timestamp", "unknown")
-                log.info("🔐 Patreon session loaded — %d cookies, stored at %s", cookie_count, timestamp)
-            except Exception:
-                log.exception("❌ Failed to decode PATREON_SESSION")
+        self.session = session_state.get_session()
+        if self.session:
+            log.info(
+                "🔐 Patreon session loaded from memory — %d cookies, stored at %s",
+                len(self.session.get("cookies", [])),
+                self.session.get("stored_at", "unknown"),
+            )
         else:
-            log.warning("⚠️  PATREON_SESSION not set — Patreon publishing disabled")
+            log.info("🔐 No Patreon session in memory — will auto-login on first publish")
 
     @staticmethod
     def _normalize(text: str) -> str:
@@ -206,7 +209,6 @@ class PatreonPublisher:
     @staticmethod
     async def _find_first_visible(page, selectors: list, timeout_ms: int = 10000):
         """Try multiple selectors, return first that becomes visible. Raise TimeoutError if none."""
-        import asyncio
         per_try = max(1500, timeout_ms // max(1, len(selectors)))
         last_err = None
         for sel in selectors:
@@ -277,18 +279,63 @@ class PatreonPublisher:
         except Exception as e:
             log.warning("⚠️  Failed to dump diagnostics: %s", e)
 
-    async def publish(self, title: str, body_text: str, destination: str = None) -> dict:
-        if not self.session:
-            log.error("❌ Cannot publish — Patreon session missing or invalid")
-            raise SessionExpiredError("Missing or invalid Patreon session")
-
+    async def _login_and_store(self) -> None:
+        """Run the Playwright login flow and replace the in-memory session."""
+        if not settings.PATREON_EMAIL or not settings.PATREON_PASSWORD:
+            session_state.mark_expired("missing_credentials")
+            raise SessionUnavailableError(
+                "Patreon login credentials missing — set PATREON_EMAIL and PATREON_PASSWORD"
+            )
         try:
-            from playwright.async_api import async_playwright
-        except ImportError:
-            log.error("❌ Playwright not installed — cannot publish to Patreon")
-            raise RuntimeError("Playwright not installed")
+            log.info("🔑 Auto-login: launching Patreon login flow...")
+            result = await perform_patreon_login(
+                email=settings.PATREON_EMAIL,
+                password=settings.PATREON_PASSWORD,
+                headless=settings.PATREON_HEADLESS,
+            )
+        except Exception as exc:
+            log.exception("❌ Auto-login failed")
+            session_state.mark_expired(str(exc) or "login_failed")
+            raise SessionUnavailableError(f"login_failed: {exc}") from exc
+        session_state.set_session(result.get("cookies", []), result.get("email"))
+        self.session = session_state.get_session()
+        log.info(
+            "✅ Auto-login succeeded — %d cookies stored in memory",
+            len(self.session.get("cookies", [])),
+        )
+
+    async def _ensure_session(self) -> None:
+        """Make sure we have an in-memory session before driving the Patreon UI."""
+        if self.session and self.session.get("cookies"):
+            return
+        log.warning("⚠️  No in-memory session — running auto-login before publish")
+        await self._login_and_store()
+
+    async def publish(self, title: str, body_text: str, destination: str = None) -> dict:
+        """Create a Patreon draft. Auto-logs-in if no session, retries once on mid-flow expiry."""
+        await self._ensure_session()
 
         log.info("🎨 Starting Patreon publish — title='%s' destination=%s", title, destination or "n/a")
+
+        last_error: Exception | None = None
+        for attempt in (1, 2):
+            try:
+                return await self._publish_once(title, body_text, destination)
+            except _SessionExpiredMidFlow as exc:
+                last_error = exc
+                if attempt == 1:
+                    log.warning("🔄 Patreon redirected to login mid-flow — refreshing session and retrying once")
+                    session_state.mark_expired("redirected_to_login")
+                    await self._login_and_store()
+                    continue
+                log.error("❌ Session still invalid after relogin — giving up")
+                session_state.mark_expired("relogin_did_not_help")
+                raise SessionUnavailableError("session_unavailable_after_relogin") from exc
+        # Should be unreachable — defensive.
+        raise SessionUnavailableError(str(last_error) if last_error else "unknown_session_failure")
+
+    async def _publish_once(self, title: str, body_text: str, destination: str = None) -> dict:
+        from playwright.async_api import async_playwright
 
         try:
             from playwright_stealth import Stealth
@@ -325,8 +372,6 @@ class PatreonPublisher:
                 profile["platform"], vw, vh, headless, slow_mo,
             )
 
-            # Prefer real Chrome (channel='chrome') when installed — harder to
-            # fingerprint than bundled Chromium. Fall back gracefully.
             browser = None
             for channel in ("chrome", None):
                 try:
@@ -361,7 +406,6 @@ class PatreonPublisher:
                     "Upgrade-Insecure-Requests": "1",
                 },
             )
-            # Inject WebGL spoof values matching this profile, then run main stealth.
             await context.add_init_script(
                 f"window.__WEBGL_VENDOR__ = {json.dumps(profile['webgl_vendor'])};"
                 f"window.__WEBGL_RENDERER__ = {json.dumps(profile['webgl_renderer'])};"
@@ -379,7 +423,7 @@ class PatreonPublisher:
                 log.debug("🥷 playwright-stealth evasions applied")
 
             try:
-                cookies = self.session.get("cookies", [])
+                cookies = (self.session or {}).get("cookies", [])
                 if cookies:
                     await context.add_cookies(cookies)
                     log.debug("🍪 Injected %d session cookies", len(cookies))
@@ -387,8 +431,6 @@ class PatreonPublisher:
                 page = await context.new_page()
 
                 # Step 0: Warm up on patreon.com root before any authenticated nav.
-                # A real user typically lands here first; jumping straight to /home
-                # with cookies pre-injected is a weak bot signal.
                 log.info("🌍 Warming up on patreon.com root...")
                 try:
                     await page.goto("https://www.patreon.com/", wait_until="domcontentloaded", timeout=60000)
@@ -411,9 +453,8 @@ class PatreonPublisher:
                 log.debug("🏠 Patreon home loaded — url=%s", page.url)
 
                 if "login" in page.url or "signup" in page.url:
-                    raise SessionExpiredError("Session expired — redirected to login")
+                    raise _SessionExpiredMidFlow("redirected to login on /home")
 
-                # Human-like jitter: small mouse + scroll motions before next nav
                 await self._human_jitter(page)
                 await self._dismiss_cookie_banner(page)
 
@@ -430,7 +471,7 @@ class PatreonPublisher:
 
                 if "login" in page.url or "signup" in page.url:
                     await self._dump_diagnostics(page, "composer_redirected_login")
-                    raise SessionExpiredError("Session expired — redirected to login")
+                    raise _SessionExpiredMidFlow("redirected to login on /posts/new")
 
                 log.debug("📝 Composer URL — %s", page.url)
 
@@ -466,7 +507,7 @@ class PatreonPublisher:
                     await self._dump_diagnostics(page, "composer_not_ready")
                     raise RuntimeError("Post composer did not mount title field")
 
-                # Step 4: Fill title (multi-selector fallback — Patreon UI changes frequently)
+                # Step 4: Fill title
                 log.info("✏️  Filling title field: '%s'", title)
                 title_selectors = [
                     'textarea[placeholder="Title"]',
@@ -494,7 +535,7 @@ class PatreonPublisher:
                 await page.wait_for_timeout(500)
                 log.debug("✅ Title filled")
 
-                # Step 5: Fill body (ProseMirror/Remirror — .fill() doesn't dispatch editor events)
+                # Step 5: Fill body
                 log.info("✏️  Filling body field (%d chars)...", len(body_text))
                 body_selectors = [
                     'div[contenteditable="true"][aria-label="Text input field for post content"]',
@@ -542,14 +583,11 @@ class PatreonPublisher:
 
                 log.info("✅ Patreon draft prepared — title='%s'", title)
 
-                # Wait long enough for Patreon's autosave to flush title, body and
-                # uploaded image before we navigate away. Image upload in particular
-                # finishes async — too short a wait drops the picture from the draft.
+                # Wait long enough for Patreon's autosave to flush title, body and image.
                 log.info("⏳ Waiting 25s for autosave to capture title/body/image...")
                 await page.wait_for_timeout(25000)
 
                 # Capture composer/draft URL before navigating away.
-                # Patreon composer URL contains the post id (e.g. /posts/<id>/edit or ?postId=<id>).
                 draft_url = page.url
                 post_id = None
                 m = re.search(r"/posts/(\d+)", draft_url) or re.search(r"[?&]postId=(\d+)", draft_url)
@@ -564,21 +602,24 @@ class PatreonPublisher:
                 await page.wait_for_timeout(2000)
                 log.info("💾 Draft save triggered — url=%s", page.url)
 
-                # Persist updated cookies
+                # Persist updated cookies into the in-memory store
                 try:
                     updated_cookies = await context.cookies()
-                    self.session["cookies"] = updated_cookies
+                    email = (self.session or {}).get("email")
+                    session_state.set_session(updated_cookies, email)
+                    self.session = session_state.get_session()
                     log.debug("🍪 Session cookies refreshed — %d cookies stored", len(updated_cookies))
                 except Exception as e:
                     log.debug("⚠️  Failed to refresh session cookies: %s", e)
 
                 result = {"success": True, "url": page.url, "draft_url": draft_url, "post_id": post_id}
-                log.info("🎉 Patreon publish complete — browser will close and restart for next post")
+                log.info("🎉 Patreon publish complete — browser will close")
                 return result
 
+            except _SessionExpiredMidFlow:
+                # Bubble up so the outer publish() loop can relogin and retry.
+                raise
             except Exception:
-                # Surface the page URL prominently so the operator can jump
-                # straight to where the automation got stuck.
                 fail_url = "<unknown>"
                 fail_title = "<unknown>"
                 try:

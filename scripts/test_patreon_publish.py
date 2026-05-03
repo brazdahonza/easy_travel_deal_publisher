@@ -5,7 +5,8 @@ can watch the automation, see exactly where it breaks, and inspect the DOM
 in DevTools.
 
 Usage:
-    # From project root, with .env populated (PATREON_SESSION required):
+    # From project root with .env populated. Either PATREON_SESSION (seed) or
+    # PATREON_EMAIL+PATREON_PASSWORD (auto-login) is required:
     PATREON_HEADLESS=false PATREON_SLOWMO_MS=300 python -m scripts.test_patreon_publish
 
     # Or pass title/body/destination as args:

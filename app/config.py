@@ -1,23 +1,24 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    DATABASE_URL: str = "sqlite:///./test.db"
+    # Auth
     INGEST_API_KEY: Optional[str] = None
-    ANTHROPIC_API_KEY: Optional[str] = None
+
+    # Patreon login
     PATREON_EMAIL: Optional[str] = None
     PATREON_PASSWORD: Optional[str] = None
-    PATREON_SESSION: Optional[str] = None
-    TWITTER_API_KEY: Optional[str] = None
-    TWITTER_API_SECRET: Optional[str] = None
-    TWITTER_ACCESS_TOKEN: Optional[str] = None
-    TWITTER_ACCESS_SECRET: Optional[str] = None
+    PATREON_SESSION: Optional[str] = None  # base64 JSON, optional seed for the in-memory session
+
+    # Telegram (operator notifications)
     TELEGRAM_BOT_TOKEN: Optional[str] = None
     TELEGRAM_CHAT_ID: Optional[str] = None
-    NEARBY_COUNTRIES: Optional[str] = None
+
+    # Patreon publishing knobs
     CREATOR_EDITOR_URL: str = "https://www.patreon.com/creator/posts/new"
     PATREON_DRY_RUN: bool = False
     PATREON_HEADLESS: bool = True
